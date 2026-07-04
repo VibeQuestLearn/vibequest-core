@@ -36,7 +36,7 @@ const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 52;
 const QUICK_QUEST_OUTPUT_TOKENS: u16 = 300;
-const LEARNING_MODULE_OUTPUT_TOKENS: u16 = 900;
+const LEARNING_MODULE_OUTPUT_TOKENS: u16 = 700;
 const TUTOR_OUTPUT_TOKENS: u16 = 520;
 
 #[derive(Clone)]
@@ -1855,8 +1855,8 @@ impl OpenAiClient {
             .post_openai_json::<AiLearningModuleCompact>(
                 prompt,
                 LEARNING_MODULE_OUTPUT_TOKENS,
-                ReasoningEffort::Minimal,
-                Duration::from_secs(30),
+                ReasoningEffort::None,
+                self.timeout,
             )
             .await?;
 
@@ -4148,7 +4148,7 @@ fn compact_ai_lesson_to_learning_lesson(
         .count();
 
     if title.is_empty()
-        || explainer.split_whitespace().count() < 120
+        || explainer.split_whitespace().count() < 18
         || code_lens.is_empty()
         || question.is_empty()
         || correct_answer.is_empty()
@@ -4377,7 +4377,7 @@ fn learning_module_prompt(request: &GenerateLearningModuleRequest) -> String {
     };
 
     format!(
-        r#"Return minified JSON only. Keys t,l. l exactly 5 objects with keys t,e,s,q,a,b,ci. Topic: CKB/Fiber/JoyID learning for vibecoders. Interests: {interests}. Goal: {goal}. Background: {background}. Pace: {pace}. Focus directive: {focus_directive}. Seed: {nonce}. Each lesson must be AI-authored for this exact learner, code-aware, and different from the others. e must be a 180-260 word deep explainer with concrete CKB/Fiber/JoyID details, one failure mode, and one denial-test idea. s one TypeScript or Rust code lens line. q a checkpoint about the lesson's generated-code trust boundary. a the correct answer. b exactly 3 plausible wrong answer labels. ci integer 0-3; vary the correct answer position naturally. No markdown."#,
+        r#"Return minified JSON only. Keys t,l. l exactly 5 objects with keys t,e,s,q,a,b,ci. Topic: CKB/Fiber/JoyID learning for vibecoders. Interests: {interests}. Goal: {goal}. Background: {background}. Pace: {pace}. Focus directive: {focus_directive}. Seed: {nonce}. Each lesson must be AI-authored for this exact learner, code-aware, and different from the others. e must be a 22-36 word learner-specific concept seed with concrete CKB/Fiber/JoyID detail, one failure mode, and one denial-test idea. s one TypeScript or Rust code lens line. q a checkpoint about the lesson's generated-code trust boundary. a the correct answer. b exactly 3 plausible wrong answer labels. ci integer 0-3; vary the correct answer position naturally. No markdown."#,
         goal = request.learner_goal.trim(),
         background = request.background.trim(),
         pace = request.pace.trim(),
