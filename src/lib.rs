@@ -302,6 +302,14 @@ struct LearningTutorMessage {
     text: String,
     why: Option<String>,
     follow_up: Option<String>,
+    #[serde(default)]
+    module_id: Option<String>,
+    #[serde(default)]
+    module_title: Option<String>,
+    #[serde(default)]
+    lesson_id: Option<String>,
+    #[serde(default)]
+    lesson_title: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -1183,12 +1191,19 @@ impl MongoStore {
             None => return Ok(None),
         };
         let now = Utc::now();
+        let lesson_id = find_lesson_id_for_title(&session.module, &request.lesson_title);
+        let module_title = Some(clamp_text(request.module_title.clone(), 140));
+        let lesson_title = Some(clamp_text(request.lesson_title.clone(), 140));
         session.tutor_messages.push(LearningTutorMessage {
             id: format!("learner-{}", now.timestamp_millis()),
             role: "learner".to_string(),
             text: clamp_text(request.question.clone(), 900),
             why: None,
             follow_up: None,
+            module_id: Some(session.id.clone()),
+            module_title: module_title.clone(),
+            lesson_id: lesson_id.clone(),
+            lesson_title: lesson_title.clone(),
             created_at: now,
         });
         session.tutor_messages.push(LearningTutorMessage {
@@ -1197,6 +1212,10 @@ impl MongoStore {
             text: answer.answer.clone(),
             why: Some(answer.why_it_matters.clone()),
             follow_up: Some(answer.follow_up_question.clone()),
+            module_id: Some(session.id.clone()),
+            module_title,
+            lesson_id,
+            lesson_title,
             created_at: now,
         });
         session.tutor_messages = compact_tutor_messages(session.tutor_messages);
@@ -3766,6 +3785,15 @@ fn compact_code_tutor_messages(messages: Vec<CodeTutorMessage>) -> Vec<CodeTutor
         .collect()
 }
 
+fn find_lesson_id_for_title(module: &LearningModule, lesson_title: &str) -> Option<String> {
+    let normalized = lesson_title.trim().to_lowercase();
+    module
+        .lessons
+        .iter()
+        .find(|lesson| lesson.title.trim().to_lowercase() == normalized)
+        .map(|lesson| lesson.id.clone())
+}
+
 fn compact_tutor_messages(messages: Vec<LearningTutorMessage>) -> Vec<LearningTutorMessage> {
     messages
         .into_iter()
@@ -3781,6 +3809,10 @@ fn compact_tutor_messages(messages: Vec<LearningTutorMessage>) -> Vec<LearningTu
             follow_up: message
                 .follow_up
                 .map(|follow_up| clamp_text(follow_up, 260)),
+            module_id: message.module_id.map(|value| clamp_text(value, 120)),
+            module_title: message.module_title.map(|value| clamp_text(value, 140)),
+            lesson_id: message.lesson_id.map(|value| clamp_text(value, 120)),
+            lesson_title: message.lesson_title.map(|value| clamp_text(value, 140)),
             created_at: message.created_at,
         })
         .rev()
@@ -5224,6 +5256,10 @@ mod tests {
                 text: format!("message {index}"),
                 why: None,
                 follow_up: None,
+                module_id: Some("ckb-cells".to_string()),
+                module_title: Some("Reviewed CKB Cells Path".to_string()),
+                lesson_id: Some("ckb-cells-lesson-1".to_string()),
+                lesson_title: Some("Cells As State".to_string()),
                 created_at: now,
             })
             .collect::<Vec<_>>();
@@ -5231,6 +5267,10 @@ mod tests {
         let compacted = compact_tutor_messages(messages);
         assert_eq!(compacted.len(), 30);
         assert_eq!(compacted.first().unwrap().id, "m-10");
+        assert_eq!(
+            compacted.first().unwrap().lesson_id.as_deref(),
+            Some("ckb-cells-lesson-1")
+        );
     }
 
     #[test]
