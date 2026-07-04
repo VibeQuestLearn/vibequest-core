@@ -161,6 +161,8 @@ struct LearningQuestLink {
 
 #[derive(Debug, Deserialize)]
 struct GenerateLearningModuleRequest {
+    #[serde(default)]
+    path_id: Option<String>,
     interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -434,6 +436,7 @@ struct PersistenceStatus {
 enum QuestSource {
     OpenAi,
     CoreFallback,
+    ReviewedPath,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2345,11 +2348,21 @@ async fn generate_learning_module(
         return Err(ApiError::InvalidPrompt);
     }
 
-    let module = state.openai.generate_learning_module(&request).await?;
+    let (module, source) = if is_ckb_cells_path_request(&request) {
+        (
+            ckb_cells_learning_module(&request)?,
+            QuestSource::ReviewedPath,
+        )
+    } else {
+        (
+            state.openai.generate_learning_module(&request).await?,
+            QuestSource::OpenAi,
+        )
+    };
 
     Ok(Json(GenerateLearningModuleResponse {
         module_id: Uuid::new_v4(),
-        source: QuestSource::OpenAi,
+        source,
         module,
         warning: None,
     }))
@@ -3757,6 +3770,270 @@ where
     })
 }
 
+fn is_ckb_cells_path_request(request: &GenerateLearningModuleRequest) -> bool {
+    request
+        .path_id
+        .as_deref()
+        .is_some_and(|path_id| path_id.eq_ignore_ascii_case("ckb-cells"))
+}
+
+fn ckb_cells_learning_module(
+    request: &GenerateLearningModuleRequest,
+) -> Result<LearningModule, ApiError> {
+    let background = if request.background.trim().is_empty() {
+        "learner"
+    } else {
+        request.background.trim()
+    };
+    let pace = if request.pace.trim().is_empty() {
+        "Focused"
+    } else {
+        request.pace.trim()
+    };
+
+    compact_learning_module(LearningModule {
+        title: "Understanding CKB Cells: From State Model To Verifier Trust Boundaries"
+            .to_string(),
+        learner_profile: format!(
+            "A {background} following the reviewed VibeQuest CKB Cells path at a {pace} pace. The path teaches one complete vertical slice before broader CKB/Fiber tracks open."
+        ),
+        outcome: "Explain CKB cells as consumed/recreated state, trace an OutPoint, distinguish lock/type script and witness responsibilities, identify local verifier trust boundaries, and prepare a CKB Cell verifier quest with denial tests.".to_string(),
+        lessons: vec![
+            ckb_cells_lesson(
+                "ckb-cells-lesson-1",
+                "Cells As State",
+                "Learn why a CKB cell is a state object that is consumed and recreated, not a mutable account row.",
+                &[
+                    "CKB cell",
+                    "capacity",
+                    "cell data",
+                    "consume/recreate",
+                    "state transition",
+                ],
+                r#"Module 1: Cells As State
+
+CKB does not ask an application to update a global account balance in place. It asks the application to consume old cells and create new cells. That one difference changes how a builder should read generated code. If code treats a CKB cell like a mutable database row, it may accidentally trust a value that was never tied to the transaction being validated. A cell is closer to a sealed piece of state: it has capacity, optional data, lock script rules, optional type script rules, and an OutPoint that identifies where it came from.
+
+The practical mental model is simple but strict. A transaction spends existing cells as inputs and creates new cells as outputs. When an input is consumed, the old state is gone. The new output cells become the next state. This is why CKB code must care about lineage. If an AI-generated verifier says `cellId === expectedCell`, that is only useful if the value is connected to the actual input being spent or the output being created. A random JSON field named `cellId` is not proof.
+
+Code lens:
+const transitionIsScoped = tx.inputs.some(input => input.previousOutput === expectedOutPoint) && tx.outputs.some(output => output.dataHash === expectedNextDataHash);
+
+When reviewing a generated app, first ask what state the code believes is real. Is it reading cell data from a trusted transaction object, or from a frontend payload? Is the capacity checked because it matters to the flow, or is it just displayed in the UI? Does the code show the old state and the new state, or only a final value? These questions are not academic. A payment, badge, or access grant can look valid in the interface while the verifier is accepting a copied state value.
+
+The habit for this lesson is to name the cell state, name the old cell being consumed, name the new cell being created, and write one denial case that mutates the state. If the verifier still accepts after the mutation, the trust boundary is wrong. This is the first step toward turning vibe-coded CKB snippets into code you can explain and defend."#,
+                "Why is it unsafe to treat CKB cell data like a mutable account row in generated verifier code?",
+                vec![
+                    LearningOption { label: "Because a CKB state update is represented by consuming old cells and creating new cells, so the verifier must bind the accepted value to that transition.".to_string(), feedback: "Correct. The state is proven through the transaction's consumed and created cells, not by trusting a loose field from the UI.".to_string() },
+                    LearningOption { label: "Because account rows are slower than cells, so the verifier should skip cell checks for performance.".to_string(), feedback: "Performance is not the trust boundary. The issue is whether the value is tied to the transaction state transition.".to_string() },
+                    LearningOption { label: "Because CKB cells are only labels for frontend balances.".to_string(), feedback: "A cell is not a UI label. It is part of CKB's state model and must be traced through inputs and outputs.".to_string() },
+                    LearningOption { label: "Because the wallet connection automatically proves all cell data.".to_string(), feedback: "A connected wallet does not prove which cell state is being consumed or created. The verifier still needs transaction-scoped evidence.".to_string() },
+                ],
+                0,
+                "The verifier must tie accepted data to consumed input cells and created output cells. A copied `cellData` field is not enough because it can be detached from the transaction transition it claims to represent.",
+                "Which field would you mutate first to prove a verifier is really checking the old-to-new cell transition?",
+                "Generate a CKB Cell verifier quest that checks consumed cell state, created cell state, and rejects a mutated cell data hash.",
+            ),
+            ckb_cells_lesson(
+                "ckb-cells-lesson-2",
+                "OutPoints And Cell Lineage",
+                "Learn how an OutPoint anchors a verifier to the exact cell being trusted instead of a lookalike payload.",
+                &[
+                    "OutPoint",
+                    "tx hash",
+                    "index",
+                    "cell lineage",
+                    "input reference",
+                ],
+                r#"Module 2: OutPoints And Cell Lineage
+
+If a cell is the state object, the OutPoint is the pointer to a specific historical cell. It identifies a cell by transaction hash and output index. This matters because many values can look identical while only one cell is the state the verifier should trust. A generated app can display the right capacity, the right owner, or the right content id, but if it does not anchor those values to the expected OutPoint, an attacker may swap in a lookalike cell or replay old state.
+
+A useful way to review CKB code is to ask: where did this cell come from? If the answer is only “the frontend sent it,” the verifier is weak. If the answer is “this input references the expected OutPoint and the output carries the expected next state,” the code is closer to a real trust boundary. OutPoint lineage is the difference between checking a story and checking evidence. The story says a user owns a cell. The evidence points to the exact cell being consumed.
+
+Code lens:
+const spendsExpectedCell = tx.inputs.some(input => input.previousOutput.txHash === expectedTxHash && input.previousOutput.index === expectedIndex);
+
+When vibe-coded code skips lineage, bugs become subtle. A test may pass because the fixture uses the expected cell id, but the function might also accept the same fixture after changing the transaction hash. That means the function is not actually proving cell identity. The denial test should mutate `txHash`, mutate `index`, or provide a copied cell payload from another transaction. The verifier should reject all of those cases.
+
+For application builders, this is where CKB starts to feel different from ordinary API validation. You are not just checking that data has a shape. You are checking that data belongs to a specific state transition. That is why a clean VibeQuest quest should ask the learner to point at the OutPoint and explain why changing it breaks the claim. If the learner cannot explain the OutPoint, they cannot confidently defend the generated verifier."#,
+                "What does an OutPoint help a verifier prove in a CKB application?",
+                vec![
+                    LearningOption { label: "It anchors the verifier to the exact previous cell by transaction hash and output index.".to_string(), feedback: "Correct. OutPoint lineage prevents the verifier from accepting a lookalike or replayed cell payload.".to_string() },
+                    LearningOption { label: "It proves that the frontend rendered the correct balance label.".to_string(), feedback: "Rendering is not lineage. The verifier must inspect the input reference, not the UI label.".to_string() },
+                    LearningOption { label: "It replaces the need to check scripts or witnesses.".to_string(), feedback: "OutPoint identity is one part of the proof. Scripts and witnesses still matter for authorization and validation.".to_string() },
+                    LearningOption { label: "It tells Fiber that an invoice has been paid.".to_string(), feedback: "OutPoints identify CKB cells. Fiber payment evidence is a separate trust boundary.".to_string() },
+                ],
+                0,
+                "An OutPoint proves which historical cell is being consumed. A verifier that ignores `txHash` or `index` can accidentally accept a copied cell payload from the wrong lineage.",
+                "Would you mutate the transaction hash or output index first when attacking an OutPoint check, and why?",
+                "Generate a CKB Cell verifier quest that rejects a copied cell payload when the OutPoint transaction hash or index changes.",
+            ),
+            ckb_cells_lesson(
+                "ckb-cells-lesson-3",
+                "Lock Scripts, Type Scripts, And Witnesses",
+                "Learn how spending authority, state rules, and transaction-time evidence are separated in CKB.",
+                &[
+                    "lock script",
+                    "type script",
+                    "witness",
+                    "authorization",
+                    "state rule",
+                ],
+                r#"Module 3: Lock Scripts, Type Scripts, And Witnesses
+
+CKB cells carry scripts that describe who may spend them and what state rules must hold. A lock script is mainly about authorization: who can unlock or spend this cell. A type script is mainly about state rules: what conditions must remain true as the cell is transformed. Witness data supplies transaction-time evidence, such as signatures or other proof material. A verifier that mixes these roles together becomes hard to audit because it cannot clearly say what proves ownership, what validates state, and what evidence can be copied.
+
+The most common vibe-coding mistake is witness substring trust. Generated code may say `witness.includes(cellId)` or `witness.includes(scriptHash)` and treat that as proof. But a witness string containing a value is not automatically bound to the transaction, the script, or the cell being spent. A strong verifier should ask whether the witness is attached to the correct input group, whether the script assumption matches the cell being consumed, and whether the evidence authorizes this exact action.
+
+Code lens:
+const witnessBindsScript = witness.inputIndex === trustedInputIndex && witness.lock === expectedLockProof && cell.lockHash === expectedLockHash;
+
+When reviewing generated code, separate the questions. First: what lock script assumption is being made? Second: what type script or state rule is being relied on? Third: what witness data proves the user is allowed to perform this action? Fourth: is the witness scoped to the same input and transaction context as the trusted cell? If the answer to any question is vague, the generated code is not ready to ship.
+
+The denial tests should mutate witness content, script hash, and input index independently. This matters because a verifier can pass the happy path while still accepting a witness copied from another context. A real learning quest should make the learner explain why witness evidence is not just text. It is evidence only when the verifier knows which cell, input, and script it is tied to."#,
+                "Why is `witness.includes(cellId)` a weak proof pattern by itself?",
+                vec![
+                    LearningOption { label: "Because a copied witness string may contain the cell id without being bound to the correct input, script, or transaction context.".to_string(), feedback: "Correct. The witness must be scoped to the same cell and script assumptions the verifier trusts.".to_string() },
+                    LearningOption { label: "Because witnesses are only used by frontend components.".to_string(), feedback: "Witnesses are transaction evidence, not frontend decoration. The issue is binding, not whether witnesses matter.".to_string() },
+                    LearningOption { label: "Because lock scripts and type scripts are always optional.".to_string(), feedback: "Scripts are central to CKB validation. A verifier should separate their roles rather than ignore them.".to_string() },
+                    LearningOption { label: "Because a wallet signature automatically fixes every witness field.".to_string(), feedback: "A signature is only meaningful when the signed evidence is scoped to the correct action and transaction context.".to_string() },
+                ],
+                0,
+                "A witness substring can be copied. A better verifier checks that witness evidence belongs to the correct input, script assumption, and transaction context.",
+                "Which witness field or script hash would you mutate to prove the verifier is not trusting copied text?",
+                "Generate a CKB Cell verifier quest that rejects copied witness evidence when the script hash or input index changes.",
+            ),
+            ckb_cells_lesson(
+                "ckb-cells-lesson-4",
+                "Transaction Structure And Local Trust Boundaries",
+                "Learn what CKB transaction structure can prove and what application verifier logic must still enforce.",
+                &[
+                    "transaction input",
+                    "transaction output",
+                    "local verifier",
+                    "trust boundary",
+                    "denial path",
+                ],
+                r#"Module 4: Transaction Structure And Local Trust Boundaries
+
+A CKB transaction gives structure: inputs, outputs, dependencies, witnesses, and scripts. That structure is powerful, but an application still has to decide what it is checking locally. A frontend may display a transaction, a backend may receive a serialized proof, and a verifier may inspect selected fields. The trust boundary is the line between evidence that comes from the CKB transaction model and assumptions introduced by the application.
+
+Generated code often blurs that line. It might check that an object has `inputs` and `outputs`, but never verify that the expected cell is actually one of the inputs. It might check that a witness exists, but not that it belongs to the same input. It might check a proposed output value, but not that it is derived from the consumed state. These are local verifier mistakes. CKB provides the model, but the application must still choose the exact invariants it cares about.
+
+Code lens:
+const localInvariant = spendsExpectedCell && createsExpectedNextCell && witnessBindsToTrustedInput && output.dataHash === expectedDataHash;
+
+A good review starts by listing each accepted branch in plain language. “This branch accepts because the input OutPoint matches, the output data hash matches, the witness is tied to the trusted input, and the script hash is the expected one.” If the branch cannot be translated that way, it is probably trusting something fuzzy. The denial path should mutate one trusted field at a time: input OutPoint, output data hash, script hash, witness binding, or transaction/run context.
+
+For VibeQuest, this lesson is the bridge between reading and building. The learner must stop treating generated code as magic and start drawing the boundary. What does CKB prove? What does the verifier check? What did the frontend merely display? That separation is the difference between a learner who can copy code and a learner who can defend code."#,
+                "What is the local verifier responsible for when reading CKB transaction-shaped data?",
+                vec![
+                    LearningOption { label: "It must enforce the app-specific invariant by checking the expected input, output, script, and witness relationships.".to_string(), feedback: "Correct. CKB provides transaction structure, but the application verifier still enforces the specific trust boundary it depends on.".to_string() },
+                    LearningOption { label: "It should trust any object that has inputs and outputs.".to_string(), feedback: "Shape is not proof. The verifier must check the expected relationships inside that structure.".to_string() },
+                    LearningOption { label: "It should only check what the frontend already rendered.".to_string(), feedback: "Frontend rendering is not a trust boundary. The verifier must inspect evidence, not labels.".to_string() },
+                    LearningOption { label: "It should skip denial tests if the CKB concepts are present in variable names.".to_string(), feedback: "Variable names can look correct while the logic accepts the wrong state. Denial tests prove behavior.".to_string() },
+                ],
+                0,
+                "The verifier must map CKB transaction evidence to the app-specific invariant. Having transaction-shaped data is not enough; the accepted fields must relate correctly.",
+                "Which accepted field would you isolate first when writing a denial test for this invariant?",
+                "Generate a CKB Cell verifier quest that checks input/output/witness relationships and rejects mismatched transaction context.",
+            ),
+            ckb_cells_lesson(
+                "ckb-cells-lesson-5",
+                "From Cell Model To Verifier Quest",
+                "Learn how to turn CKB Cell understanding into generated verifier code, denial tests, and a boss explanation.",
+                &[
+                    "verifier",
+                    "denial test",
+                    "replay resistance",
+                    "boss challenge",
+                    "proof of understanding",
+                ],
+                r#"Module 5: From Cell Model To Verifier Quest
+
+The final step is turning the CKB Cell model into a practical verifier. The verifier does not need to simulate all of CKB. It needs to model one clear trust boundary: this app accepts a claim only when the expected cell lineage, script assumption, witness evidence, and output state agree. That is enough to teach the habit reviewers care about. The user should be able to point at the generated code and say what it trusts, what it rejects, and why the denial tests matter.
+
+A CKB Cell verifier quest should produce code that is small enough to inspect but meaningful enough to attack. It should include a trusted claim object, a transaction-shaped proof object, an accepting branch, and several denial cases. A valid proof should pass. A proof with the wrong OutPoint should fail. A proof with copied witness evidence should fail. A proof with a mismatched output data hash should fail. A replayed proof from another run or context should fail.
+
+Code lens:
+const accepted = outpointMatches && scriptMatches && witnessMatchesInput && outputStateMatches && runContextMatches;
+
+The boss challenge should not ask generic trivia like “What is a cell?” It should ask about the generated verifier. For example: “Which field prevents a copied cell payload from another transaction?” or “Why does mutating the witness input index break the proof?” That forces the learner to connect concept to code. If they only memorized words, they will struggle. If they traced the verifier, they can answer.
+
+This is the VibeQuest learning contract: AI may generate the first version, but the learner must inspect it, test it, and explain it. The dashboard record is useful only if it reflects that loop. The completion state should mean the learner has passed the checkpoint, generated the quest, verified the files, answered the boss challenge, and can return later to review the evidence. That is how vibe-coding becomes actual learning instead of a black box."#,
+                "What should a CKB Cell verifier quest prove before VibeQuest marks it complete?",
+                vec![
+                    LearningOption { label: "It should prove the generated code binds cell lineage, script assumptions, witness evidence, output state, and run context, then rejects mutations of those fields.".to_string(), feedback: "Correct. Completion should mean the learner understands the verifier's invariant and the denial tests that defend it.".to_string() },
+                    LearningOption { label: "It should prove that the UI rendered the generated file names.".to_string(), feedback: "Rendering files is not understanding. The quest must verify code behavior and trust boundaries.".to_string() },
+                    LearningOption { label: "It should pass one happy-path test without attacking any trusted field.".to_string(), feedback: "A happy path alone cannot prove replay resistance or mismatch handling.".to_string() },
+                    LearningOption { label: "It should accept any witness that contains the expected cell id.".to_string(), feedback: "That repeats the weak witness-substring pattern. The verifier must bind witness evidence to the correct input and context.".to_string() },
+                ],
+                0,
+                "Completion should prove more than generation. The learner must verify the invariant, inspect denial paths, and explain why mutated trusted fields are rejected.",
+                "Which denial test best proves the generated verifier is not accepting copied cell evidence?",
+                "Generate a CKB Cell verifier quest with OutPoint, script, witness, output-state, and replay denial tests.",
+            ),
+        ],
+        capstone_quest_prompt: "Generate a CKB Cell verifier quest with OutPoint lineage, script and witness binding, output-state checks, replay denial tests, and a boss challenge tied to the generated code.".to_string(),
+        resources: ckb_cells_learning_resources(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ckb_cells_lesson(
+    id: &str,
+    title: &str,
+    why_it_matters: &str,
+    concepts: &[&str],
+    explanation: &str,
+    question: &str,
+    options: Vec<LearningOption>,
+    correct_index: usize,
+    checkpoint_explanation: &str,
+    follow_up_question: &str,
+    quest_bridge: &str,
+) -> LearningLesson {
+    LearningLesson {
+        id: id.to_string(),
+        title: title.to_string(),
+        why_it_matters: why_it_matters.to_string(),
+        explanation: explanation.trim().to_string(),
+        concepts: concepts
+            .iter()
+            .map(|concept| (*concept).to_string())
+            .collect(),
+        checkpoint: LearningCheckpoint {
+            question: question.to_string(),
+            options,
+            correct_index,
+            explanation: checkpoint_explanation.to_string(),
+            follow_up_question: follow_up_question.to_string(),
+        },
+        quest_bridge: quest_bridge.to_string(),
+    }
+}
+
+fn ckb_cells_learning_resources() -> Vec<LearningResource> {
+    vec![
+        LearningResource {
+            title: "CKB Docs".to_string(),
+            url: "https://docs.nervos.org/".to_string(),
+            reason: "Use this as the primary reference for CKB cells, transactions, scripts, and witnesses.".to_string(),
+        },
+        LearningResource {
+            title: "Nervos CKB Repository".to_string(),
+            url: "https://github.com/nervosnetwork/ckb".to_string(),
+            reason: "Reference the node implementation and ecosystem source when moving from concepts to deeper protocol study.".to_string(),
+        },
+        LearningResource {
+            title: "CKB RFCs".to_string(),
+            url: "https://github.com/nervosnetwork/rfcs".to_string(),
+            reason: "Use RFCs for deeper design context after completing the first CKB Cells learning path.".to_string(),
+        },
+    ]
+}
+
 fn default_learning_resources() -> Vec<LearningResource> {
     vec![
         LearningResource {
@@ -4754,6 +5031,7 @@ mod tests {
     #[test]
     fn compact_ai_module_builder_keeps_authored_text() {
         let request = GenerateLearningModuleRequest {
+            path_id: None,
             interests: vec!["CKB Foundations".to_string(), "Fiber Payments".to_string()],
             learner_goal: "Understand generated CKB/Fiber verifier code".to_string(),
             background: "Backend dev".to_string(),
@@ -4791,6 +5069,53 @@ mod tests {
         );
         assert_eq!(module.lessons[0].checkpoint.options.len(), 4);
         assert!(module.lessons[0].why_it_matters.contains("Backend dev"));
+    }
+
+    #[test]
+    fn ckb_cells_reviewed_path_is_concrete_and_deep() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("ckb-cells".to_string()),
+            interests: vec!["CKB Cells".to_string()],
+            learner_goal: "Understand CKB cells before verifier quests".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Focused".to_string(),
+        };
+
+        let module = ckb_cells_learning_module(&request).unwrap();
+        let all_text = module
+            .lessons
+            .iter()
+            .map(|lesson| {
+                format!(
+                    "{} {} {}",
+                    lesson.title, lesson.explanation, lesson.quest_bridge
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+
+        assert_eq!(module.lessons.len(), 5);
+        assert!(module.title.contains("Understanding CKB Cells"));
+        assert!(module.capstone_quest_prompt.contains("OutPoint"));
+        assert!(
+            module
+                .lessons
+                .iter()
+                .all(|lesson| lesson.explanation.split_whitespace().count() >= 300)
+        );
+        assert!(
+            module
+                .lessons
+                .iter()
+                .all(|lesson| lesson.checkpoint.options.len() == 4)
+        );
+        assert!(all_text.contains("outpoint"));
+        assert!(all_text.contains("lock script"));
+        assert!(all_text.contains("type script"));
+        assert!(all_text.contains("witness"));
+        assert!(all_text.contains("denial"));
+        assert!(all_text.contains("verifier quest"));
     }
 
     #[test]
