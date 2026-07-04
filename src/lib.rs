@@ -512,6 +512,7 @@ struct AiQuestSeed {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuestDomain {
+    CkbCell,
     Receipt,
     Witness,
     Split,
@@ -2956,7 +2957,7 @@ fn build_quest_from_ai_seed(
     seed: AiQuestSeed,
     run_id: Uuid,
 ) -> Result<QuestBlueprint, ApiError> {
-    let domain = parse_quest_domain(&seed.d, &request.build_prompt);
+    let domain = quest_domain_for_request(request, &seed);
     let uuid_seed = run_id.simple().to_string();
     let short_seed = &uuid_seed[..8];
     let title = non_empty_or(clamp_text(seed.t, 80), quest_title_for_domain(domain));
@@ -2965,6 +2966,7 @@ fn build_quest_from_ai_seed(
     let function_name = function_for_domain(domain);
     let trusted_field = trusted_fields_for_domain(domain);
     let (implementation, test_content) = quest_files_for_domain(domain, function_name, short_seed);
+    let (implementation_path, test_path) = quest_file_paths_for_domain(domain);
 
     compact_quest_blueprint(QuestBlueprint {
         title,
@@ -3006,8 +3008,8 @@ fn build_quest_from_ai_seed(
             attack_scenario: format!(
                 "An attacker reuses a valid-looking proof while changing {attack_field} to unlock the wrong content, run, cell, settlement, or payout."
             ),
-            code_focus: format!("Trace the accepting branch inside src/quest.ts::{function_name}."),
-            test_focus: format!("Inspect test/quest.test.ts where {attack_field} is mutated."),
+            code_focus: format!("Trace the accepting branch inside {implementation_path}::{function_name}."),
+            test_focus: format!("Inspect {test_path} where {attack_field} is mutated."),
             hint: "Name every trusted field, then map each one to a denial assertion.".to_string(),
             follow_up_question: format!(
                 "Which second denial test would you add after mutating {attack_field}, and why?"
@@ -3021,12 +3023,12 @@ fn build_quest_from_ai_seed(
         ],
         workbench_files: vec![
             WorkbenchFile {
-                path: "src/quest.ts".to_string(),
+                path: implementation_path.to_string(),
                 language: "ts".to_string(),
                 content: implementation,
             },
             WorkbenchFile {
-                path: "test/quest.test.ts".to_string(),
+                path: test_path.to_string(),
                 language: "ts".to_string(),
                 content: test_content,
             },
@@ -3034,9 +3036,34 @@ fn build_quest_from_ai_seed(
     })
 }
 
+fn quest_domain_for_request(request: &GenerateQuestRequest, seed: &AiQuestSeed) -> QuestDomain {
+    if let Some(context) = &request.learning_context {
+        if is_ckb_cells_lesson_context(context) {
+            return QuestDomain::CkbCell;
+        }
+    }
+
+    parse_quest_domain(&seed.d, &request.build_prompt)
+}
+
+fn is_ckb_cells_lesson_context(context: &LearningQuestLink) -> bool {
+    context.module_id.eq_ignore_ascii_case("ckb-cells")
+        || context.lesson_id.starts_with("ckb-cells-")
+        || context.module_title.to_lowercase().contains("ckb cell")
+}
+
 fn parse_quest_domain(value: &str, prompt: &str) -> QuestDomain {
     let lower = format!("{} {}", value, prompt).to_lowercase();
-    if lower.contains("split")
+    if lower.contains("ckb-cell")
+        || lower.contains("ckb cell")
+        || lower.contains("cell model")
+        || lower.contains("outpoint")
+        || lower.contains("out point")
+        || lower.contains("cell lineage")
+        || lower.contains("cell verifier")
+    {
+        QuestDomain::CkbCell
+    } else if lower.contains("split")
         || lower.contains("xudt")
         || lower.contains("payout")
         || lower.contains("creator")
@@ -3054,6 +3081,7 @@ fn parse_quest_domain(value: &str, prompt: &str) -> QuestDomain {
 
 fn domain_label(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => "CKB cell-lineage verifier",
         QuestDomain::Receipt => "receipt replay-defense",
         QuestDomain::Witness => "CKB witness-binding",
         QuestDomain::Split => "xUDT payout-split",
@@ -3063,6 +3091,7 @@ fn domain_label(domain: QuestDomain) -> &'static str {
 
 fn quest_title_for_domain(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => "CKB Cell Verifier Lab",
         QuestDomain::Receipt => "Fiber Receipt Replay Lab",
         QuestDomain::Witness => "CKB Witness Binding Lab",
         QuestDomain::Split => "xUDT Payout Integrity Lab",
@@ -3072,6 +3101,7 @@ fn quest_title_for_domain(domain: QuestDomain) -> &'static str {
 
 fn function_for_domain(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => "verifyCkbCellProof",
         QuestDomain::Receipt => "verifyPaidReadReceipt",
         QuestDomain::Witness => "verifyWitnessBoundReceipt",
         QuestDomain::Split => "verifyPayoutSplitReceipt",
@@ -3081,6 +3111,9 @@ fn function_for_domain(domain: QuestDomain) -> &'static str {
 
 fn invariant_for_domain(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => {
+            "the witness binds run id, input index, outpoint, cell data, and scripts"
+        }
         QuestDomain::Receipt => {
             "the receipt is scoped to reader, content, run id, CKB cell, and Fiber channel state"
         }
@@ -3098,6 +3131,9 @@ fn invariant_for_domain(domain: QuestDomain) -> &'static str {
 
 fn trusted_fields_for_domain(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => {
+            "runId, inputIndex, outPoint, cellDataHash, lockScriptHash, typeScriptHash, and witness signature"
+        }
         QuestDomain::Receipt => {
             "reader, contentId, runId, ckbCell, invoice, preimage, and channelState"
         }
@@ -3115,10 +3151,18 @@ fn trusted_fields_for_domain(domain: QuestDomain) -> &'static str {
 
 fn attack_field_for_domain(domain: QuestDomain) -> &'static str {
     match domain {
+        QuestDomain::CkbCell => "outPoint",
         QuestDomain::Receipt => "runId",
         QuestDomain::Witness => "ckbCell",
         QuestDomain::Split => "amountXudt",
         QuestDomain::Settlement => "eventId",
+    }
+}
+
+fn quest_file_paths_for_domain(domain: QuestDomain) -> (&'static str, &'static str) {
+    match domain {
+        QuestDomain::CkbCell => ("src/cellVerifier.ts", "test/cellVerifier.test.ts"),
+        _ => ("src/quest.ts", "test/quest.test.ts"),
     }
 }
 
@@ -3128,6 +3172,14 @@ fn quest_files_for_domain(
     short_seed: &str,
 ) -> (String, String) {
     match domain {
+        QuestDomain::CkbCell => (
+            format!(
+                "export const QUEST_SEED='{short_seed}';\nexport type OutPoint={{txHash:string;index:number}};\nexport type CellClaim={{runId:string;inputIndex:number;outPoint:OutPoint;cellDataHash:string;lockScriptHash:string;typeScriptHash:string}};\nexport type WitnessProof={{runId:string;inputIndex:number;outPoint:OutPoint;cellDataHash:string;lockScriptHash:string;typeScriptHash:string;signature:string}};\nexport function {function_name}(proof:WitnessProof|undefined,claim:CellClaim){{\n  if(!proof)return false;\n  const sameRun=proof.runId===claim.runId&&proof.inputIndex===claim.inputIndex;\n  const sameOutPoint=proof.outPoint.txHash===claim.outPoint.txHash&&proof.outPoint.index===claim.outPoint.index;\n  const sameCellData=proof.cellDataHash===claim.cellDataHash;\n  const sameScripts=proof.lockScriptHash===claim.lockScriptHash&&proof.typeScriptHash===claim.typeScriptHash;\n  const witnessBound=proof.signature.includes(`run:${{claim.runId}}`)&&proof.signature.includes(`input:${{claim.inputIndex}}`)&&proof.signature.includes(`outpoint:${{claim.outPoint.txHash}}:${{claim.outPoint.index}}`)&&proof.signature.includes(`lock:${{claim.lockScriptHash}}`)&&proof.signature.includes(`type:${{claim.typeScriptHash}}`);\n  return sameRun&&sameOutPoint&&sameCellData&&sameScripts&&witnessBound;\n}}"
+            ),
+            format!(
+                "import {{{function_name},type CellClaim,type WitnessProof}} from '../src/cellVerifier';\nconst claim:CellClaim={{runId:'vq-{short_seed}',inputIndex:0,outPoint:{{txHash:'0x{short_seed}',index:0}},cellDataHash:'data:{short_seed}',lockScriptHash:'lock:joyid',typeScriptHash:'type:paywall'}};\nconst proof:WitnessProof={{...claim,signature:'run:vq-{short_seed}|input:0|outpoint:0x{short_seed}:0|lock:lock:joyid|type:type:paywall'}};\ntest('accepts witness bound to exact CKB outpoint, scripts, and run',()=>expect({function_name}(proof,claim)).toBe(true));\ntest('rejects copied witness for another outpoint',()=>expect({function_name}({{...proof,outPoint:{{...proof.outPoint,index:1}}}},claim)).toBe(false));\ntest('rejects replayed run id even with the same outpoint',()=>expect({function_name}({{...proof,runId:'vq-old'}},claim)).toBe(false));\ntest('rejects lock script mismatch before unlock',()=>expect({function_name}({{...proof,lockScriptHash:'lock:attacker'}},claim)).toBe(false));"
+            ),
+        ),
         QuestDomain::Split => (
             format!(
                 "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport function {function_name}(receipt:Receipt,claim:Claim){{\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const sameEconomics=receipt.amountXudt===claim.amountXudt&&receipt.creatorBps===claim.creatorBps;\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-');\n  return sameAccess&&sameCell&&sameEconomics&&fiberProof;\n}}\nexport function payoutSplit(amountXudt:bigint,creatorBps:number){{const creator=amountXudt*BigInt(creatorBps)/10000n;return {{creator,protocol:amountXudt-creator}};}}"
@@ -3171,6 +3223,10 @@ fn compile_lesson_quest(
         .learning_context
         .as_ref()
         .ok_or(ApiError::InvalidAiResponse)?;
+    if is_ckb_cells_lesson_context(context) {
+        return compile_ckb_cell_lesson_quest(request, context, run_id);
+    }
+
     let lower_prompt = request.build_prompt.to_lowercase();
     let uses_split = lower_prompt.contains("split")
         || lower_prompt.contains("xudt")
@@ -3298,6 +3354,85 @@ fn compile_lesson_quest(
             },
             WorkbenchFile {
                 path: "test/lessonQuest.test.ts".to_string(),
+                language: "ts".to_string(),
+                content: test_content,
+            },
+        ],
+    })
+}
+
+fn compile_ckb_cell_lesson_quest(
+    request: &GenerateQuestRequest,
+    context: &LearningQuestLink,
+    run_id: Uuid,
+) -> Result<QuestBlueprint, ApiError> {
+    let domain = QuestDomain::CkbCell;
+    let seed = run_id.simple().to_string();
+    let short_seed = &seed[..8];
+    let function_name = function_for_domain(domain);
+    let trusted_field = trusted_fields_for_domain(domain);
+    let attack_field = attack_field_for_domain(domain);
+    let invariant = invariant_for_domain(domain);
+    let (implementation, test_content) = quest_files_for_domain(domain, function_name, short_seed);
+    let (implementation_path, test_path) = quest_file_paths_for_domain(domain);
+
+    compact_quest_blueprint(QuestBlueprint {
+        title: format!("{} Cell Verifier Quest", context.lesson_title),
+        premise: format!(
+            "This quest comes from the reviewed CKB Cells path. It turns lesson '{}' into a verifier that checks exact cell lineage, script assumptions, witness binding, and replay resistance.",
+            context.lesson_title
+        ),
+        build_objective: clamp_text(request.build_prompt.clone(), 420),
+        comprehension_gates: vec![
+            "Trace the accepted CKB cell from OutPoint to lock/type script hashes.".to_string(),
+            "Run denial tests that mutate outPoint, runId, and lockScriptHash.".to_string(),
+            "Explain which facts are proven by CKB transaction data versus checked locally in the verifier.".to_string(),
+        ],
+        boss_fight: format!(
+            "In {function_name}, prove this invariant: {invariant}. Then explain why mutating {attack_field} blocks a copied witness from authorizing the wrong cell."
+        ),
+        challenge_brief: Some(QuestChallengeBrief {
+            question: format!(
+                "Which proof boundary must {function_name} defend before this CKB Cell quest can be completed?"
+            ),
+            correct_answer: format!(
+                "It must bind {trusted_field} to the same transaction input and reject the denial tests that mutate {attack_field}, runId, and lockScriptHash."
+            ),
+            wrong_answers: vec![
+                ChallengeWrongAnswer {
+                    label: "Only check that JoyID connected before reading cell data.".to_string(),
+                    feedback: "Wallet connection identifies the learner, but it does not prove this transaction input, OutPoint, or script state is authorized.".to_string(),
+                },
+                ChallengeWrongAnswer {
+                    label: "Accept witness.includes(cellId) because it mentions the expected cell.".to_string(),
+                    feedback: "A substring check is copyable. The witness must bind run id, input index, outpoint, and script hashes together.".to_string(),
+                },
+                ChallengeWrongAnswer {
+                    label: "Trust a Fiber preimage without checking CKB cell lineage.".to_string(),
+                    feedback: "Fiber payment evidence still needs to map back to the exact CKB-backed state being unlocked.".to_string(),
+                },
+            ],
+            invariant: invariant.to_string(),
+            attack_scenario: "An attacker copies a witness from a valid transaction and swaps the OutPoint or run id so a different cell appears authorized.".to_string(),
+            code_focus: format!("Trace {implementation_path}::{function_name}, especially sameOutPoint, sameScripts, and witnessBound."),
+            test_focus: format!("Inspect {test_path}; each denial test mutates a trusted CKB field."),
+            hint: "Follow the cell: OutPoint -> data hash -> lock/type script hashes -> witness signature fields.".to_string(),
+            follow_up_question: "Which single field would you mutate first to prove the verifier is not accepting a copied witness?".to_string(),
+            resources: ckb_cells_learning_resources().into_iter().take(3).collect(),
+        }),
+        reward_logic: "XP unlocks after the learner proves the generated cell verifier rejects copied witness, wrong OutPoint, stale run id, and script mismatch cases.".to_string(),
+        ckb_fiber_hooks: vec![
+            "CKB side: OutPoint, cell data hash, lock script hash, type script hash, and witness binding define the proof boundary.".to_string(),
+            "Fiber side: future payout or paid-access quests must map payment state back to this exact CKB-backed claim.".to_string(),
+        ],
+        workbench_files: vec![
+            WorkbenchFile {
+                path: implementation_path.to_string(),
+                language: "ts".to_string(),
+                content: implementation,
+            },
+            WorkbenchFile {
+                path: test_path.to_string(),
                 language: "ts".to_string(),
                 content: test_content,
             },
@@ -4805,7 +4940,7 @@ fn quest_prompt(
         })
         .unwrap_or_else(|| "Learning source: direct quest request.".to_string());
     format!(
-        r#"Return minified JSON only. Keys t,d,i,a. t quest title. d one of receipt,witness,split,settlement. i invariant max 18 words. a attack field max 3 words. Request: {build_prompt}. Skill track: {track}. Difficulty: {difficulty:?}. {learning_context} Seed: {nonce}. Pick a domain that best matches the request and lesson. No markdown."#
+        r#"Return minified JSON only. Keys t,d,i,a. t quest title. d one of ckb-cell,receipt,witness,split,settlement. i invariant max 18 words. a attack field max 3 words. Request: {build_prompt}. Skill track: {track}. Difficulty: {difficulty:?}. {learning_context} Seed: {nonce}. Pick a domain that best matches the request and lesson. No markdown."#
     )
 }
 
@@ -4924,6 +5059,76 @@ mod tests {
         assert!(workspace.contains("fiber"));
         assert!(workspace.contains("ckb"));
         assert!(workspace.contains("rejects") || workspace.contains("blocks"));
+    }
+
+    #[test]
+    fn ckb_cells_lesson_compiles_cell_verifier_workspace() {
+        let request = GenerateQuestRequest {
+            build_prompt: "Generate the CKB Cell verifier quest from the completed lesson"
+                .to_string(),
+            skill_track: Some("CKB Foundations".to_string()),
+            difficulty: Some(Difficulty::Builder),
+            wallet: joyid_wallet_fixture(),
+            learning_context: Some(LearningQuestLink {
+                module_id: "ckb-cells".to_string(),
+                lesson_id: "ckb-cells-lesson-5".to_string(),
+                module_title: "Reviewed CKB Cells Path".to_string(),
+                lesson_title: "From Cell Model To Verifier Quest".to_string(),
+                checkpoint_question: "Which field would you mutate first?".to_string(),
+            }),
+        };
+
+        let quest = compile_lesson_quest(&request, Uuid::new_v4()).unwrap();
+        let implementation = &quest.workbench_files[0];
+        let test_file = &quest.workbench_files[1];
+        let workspace = format!("{}\n{}", implementation.content, test_file.content).to_lowercase();
+
+        assert_eq!(implementation.path, "src/cellVerifier.ts");
+        assert_eq!(test_file.path, "test/cellVerifier.test.ts");
+        assert!(workspace.contains("verifyckbcellproof"));
+        assert!(workspace.contains("outpoint"));
+        assert!(workspace.contains("lockscript"));
+        assert!(workspace.contains("typescripthash"));
+        assert!(workspace.contains("witnessbound"));
+        assert!(workspace.contains("rejects copied witness"));
+        assert!(workspace.contains("rejects replayed run id"));
+        assert!(workspace.contains("rejects lock script mismatch"));
+    }
+
+    #[test]
+    fn ckb_cells_context_overrides_generic_ai_seed_domain() {
+        let request = GenerateQuestRequest {
+            build_prompt: "Turn the CKB cells lesson into a code quest".to_string(),
+            skill_track: Some("CKB Foundations".to_string()),
+            difficulty: Some(Difficulty::Builder),
+            wallet: joyid_wallet_fixture(),
+            learning_context: Some(LearningQuestLink {
+                module_id: "ckb-cells".to_string(),
+                lesson_id: "ckb-cells-lesson-2".to_string(),
+                module_title: "Reviewed CKB Cells Path".to_string(),
+                lesson_title: "OutPoints And Cell Lineage".to_string(),
+                checkpoint_question: "What proves the prior cell?".to_string(),
+            }),
+        };
+        let seed = AiQuestSeed {
+            t: "Generic receipt lab".to_string(),
+            d: "receipt".to_string(),
+            i: "receipt binds a paid action".to_string(),
+            a: "runId".to_string(),
+        };
+
+        let quest = build_quest_from_ai_seed(&request, seed, Uuid::new_v4()).unwrap();
+        let workspace = quest
+            .workbench_files
+            .iter()
+            .map(|file| format!("{}\n{}", file.path, file.content).to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(workspace.contains("src/cellverifier.ts"));
+        assert!(workspace.contains("test/cellverifier.test.ts"));
+        assert!(workspace.contains("outpoint"));
+        assert!(workspace.contains("inputindex"));
     }
 
     #[test]
