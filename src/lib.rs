@@ -37,7 +37,7 @@ const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minima
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 90;
 const QUICK_QUEST_OUTPUT_TOKENS: u16 = 1600;
 const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 1550;
-const TUTOR_OUTPUT_TOKENS: u16 = 520;
+const TUTOR_OUTPUT_TOKENS: u16 = 780;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -2107,8 +2107,8 @@ impl OpenAiClient {
         let answer = parse_openai_json_response::<LearningTutorAiResponse>(&response_body)?;
         Ok(LearningTutorResponse {
             source: QuestSource::OpenAi,
-            answer: clamp_text(answer.answer, 900),
-            why_it_matters: clamp_text(answer.why_it_matters, 500),
+            answer: clamp_text(answer.answer, 1200),
+            why_it_matters: clamp_text(answer.why_it_matters, 650),
             follow_up_question: clamp_text(answer.follow_up_question, 220),
             references: compact_learning_resources(answer.references),
         })
@@ -4454,21 +4454,24 @@ Rules:
 
 fn learning_tutor_prompt(request: &LearningTutorRequest) -> String {
     format!(
-        r#"Return minified JSON only.
-No markdown. No prose outside JSON.
+        r#"Return minified JSON only. No markdown. No prose outside JSON.
 
 Module: {module}
-Lesson: {lesson}
-Lesson context: {context}
+Active lesson: {lesson}
+Structured active generated lesson context:
+{context}
+
 Learner question: {question}
 
 Keys exactly: answer,why_it_matters,follow_up_question,references.
 Rules:
-- Answer as a patient senior CKB/Fiber tutor.
-- Explain the concept directly, then name the common vibecoding misunderstanding.
-- If the learner is wrong or vague, explain why and ask a different related follow-up question.
+- Treat the structured active generated lesson context as the primary source of truth.
+- Anchor the answer to the lesson title, code lens, checkpoint, selected answer state, and practice quest bridge when present.
+- If the learner asks for a walkthrough, explain: concept gist, how the code lens works, what the checkpoint is testing, the likely vibecoding mistake, and one concrete denial-test habit.
+- If the learner is wrong or vague, correct the misunderstanding using the checkpoint options/feedback and ask a different related follow-up question.
+- Do not answer as a generic CKB/Fiber overview unless the lesson context is missing; connect every outside concept back to this active lesson.
 - references: 2-3 authoritative links with title,url,reason. Prefer CKB Docs, Fiber repo, JoyID docs when relevant.
-- Keep answer under 160 words."#,
+- Keep answer under 230 words. Keep why_it_matters under 90 words. follow_up_question must be one question tied to this lesson."#,
         module = request.module_title.trim(),
         lesson = request.lesson_title.trim(),
         context = request.lesson_context.trim(),
