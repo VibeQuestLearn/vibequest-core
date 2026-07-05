@@ -35,7 +35,7 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 90;
-const QUICK_QUEST_OUTPUT_TOKENS: u16 = 1600;
+const QUICK_QUEST_OUTPUT_TOKENS: u16 = 2600;
 const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 1550;
 const TUTOR_OUTPUT_TOKENS: u16 = 780;
 
@@ -157,6 +157,16 @@ struct LearningQuestLink {
     module_title: String,
     lesson_title: String,
     checkpoint_question: String,
+    #[serde(default)]
+    quest_bridge: String,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    concepts: Vec<String>,
+    #[serde(default)]
+    correct_answer: String,
+    #[serde(default)]
+    misunderstanding: String,
+    #[serde(default)]
+    lesson_summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1880,6 +1890,7 @@ impl OpenAiClient {
             track,
             &difficulty,
             request.learning_context.as_ref(),
+            false,
         );
         let seed = self
             .post_openai_json::<AiQuestSeed>(
@@ -1890,7 +1901,29 @@ impl OpenAiClient {
             )
             .await?;
 
-        build_quest_from_ai_seed(request, seed, Uuid::new_v4())
+        match build_quest_from_ai_seed(request, seed, Uuid::new_v4()) {
+            Ok(quest) => Ok(quest),
+            Err(ApiError::InvalidAiResponse) if request.learning_context.is_some() => {
+                warn!("lesson-derived AI quest seed failed validation; retrying once");
+                let repair_prompt = quest_prompt(
+                    request.build_prompt.trim(),
+                    track,
+                    &difficulty,
+                    request.learning_context.as_ref(),
+                    true,
+                );
+                let repaired_seed = self
+                    .post_openai_json::<AiQuestSeed>(
+                        repair_prompt,
+                        QUICK_QUEST_OUTPUT_TOKENS,
+                        ReasoningEffort::None,
+                        self.timeout,
+                    )
+                    .await?;
+                build_quest_from_ai_seed(request, repaired_seed, Uuid::new_v4())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn generate_learning_module(
@@ -3623,6 +3656,17 @@ fn compact_learning_quest_link(link: LearningQuestLink) -> LearningQuestLink {
         module_title: clamp_text(link.module_title, 140),
         lesson_title: clamp_text(link.lesson_title, 140),
         checkpoint_question: clamp_text(link.checkpoint_question, 260),
+        quest_bridge: clamp_text(link.quest_bridge, 360),
+        concepts: link
+            .concepts
+            .into_iter()
+            .map(|concept| clamp_text(concept, 48))
+            .filter(|concept| !concept.trim().is_empty())
+            .take(8)
+            .collect(),
+        correct_answer: clamp_text(link.correct_answer, 260),
+        misunderstanding: clamp_text(link.misunderstanding, 360),
+        lesson_summary: clamp_text(link.lesson_summary, 420),
     }
 }
 
@@ -4525,20 +4569,52 @@ fn quest_prompt(
     track: &str,
     difficulty: &Difficulty,
     learning_context: Option<&LearningQuestLink>,
+    repair: bool,
 ) -> String {
     let nonce = Uuid::new_v4();
     let learning_context = learning_context
         .map(|context| {
+            let concepts = if context.concepts.is_empty() {
+                "none supplied".to_string()
+            } else {
+                context.concepts.join(", ")
+            };
             format!(
-                "Learning source: module '{module}', lesson '{lesson}', checkpoint '{checkpoint}'.",
-                module = context.module_title,
-                lesson = context.lesson_title,
-                checkpoint = context.checkpoint_question,
+                "LESSON-DERIVED QUEST CONTEXT: module='{module}', lesson='{lesson}', concepts='{concepts}', checkpoint='{checkpoint}', correct_answer='{answer}', misconception_to_test='{misunderstanding}', lesson_summary='{summary}', practice_quest_bridge='{bridge}'.",
+                module = context.module_title.trim(),
+                lesson = context.lesson_title.trim(),
+                concepts = concepts,
+                checkpoint = context.checkpoint_question.trim(),
+                answer = context.correct_answer.trim(),
+                misunderstanding = context.misunderstanding.trim(),
+                summary = context.lesson_summary.trim(),
+                bridge = context.quest_bridge.trim(),
             )
         })
         .unwrap_or_else(|| "Learning source: direct quest request.".to_string());
+    let repair_directive = if repair {
+        "Previous quest seed was rejected because the code/test JSON was incomplete or generic. Return complete c and p strings with domain terms, verifier code, one passing assertion, and two denial assertions."
+    } else {
+        ""
+    };
     format!(
-        r#"Return minified JSON only. Keys t,d,i,a,c,p. t quest title. d one of ckb-cell,receipt,witness,split,settlement. i invariant max 18 words. a attack field max 3 words. c TypeScript implementation file, 35 lines max, export types and one verifier function. p TypeScript test file, 28 lines max, import from ../src/quest, include one passing test and two denial tests that mutate the trusted field. Request: {build_prompt}. Skill track: {track}. Difficulty: {difficulty:?}. {learning_context} Seed: {nonce}. Use __RUN_SEED__ where a unique id is needed. Code must match the request and lesson; no markdown."#
+        r#"Return one minified JSON object only. Keys exactly: t,d,i,a,c,p. No markdown. No prose outside JSON.
+
+Request: {build_prompt}
+Skill track: {track}
+Difficulty: {difficulty:?}
+{learning_context}
+{repair_directive}
+
+Rules:
+- t: specific quest title from the lesson.
+- d: one of ckb-cell,receipt,witness,split,settlement. Choose the domain that best matches the lesson/context.
+- i: concrete invariant, max 22 words, tied to the lesson's checkpoint and misconception.
+- a: one trusted field to mutate, max 4 words, and it must appear in c and p.
+- c: TypeScript implementation as a JSON string, 45-70 lines max. Export types plus one verifier function. Use __RUN_SEED__ for run id. Include explicit CKB/Fiber/JoyID/xUDT terms that match d. The verifier must reject missing proof and mismatched trusted fields.
+- p: TypeScript test as a JSON string, 35-60 lines max. Import from ../src/quest unless d is ckb-cell, then import from ../src/cellVerifier. Include one passing assertion plus two denial assertions. Denial tests must mutate a and use words like replay, mismatch, reject, false, throw, invalid, unpaid, or block.
+- Code must be original for this lesson, not a generic paywall snippet. The boss challenge should be answerable by reading c and p.
+Seed: {nonce}."#
     )
 }
 
@@ -4698,6 +4774,11 @@ Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXu
                 module_title: "AI CKB Cells Focus".to_string(),
                 lesson_title: "AI Generated OutPoint Drill".to_string(),
                 checkpoint_question: "What proves the prior cell?".to_string(),
+                quest_bridge: "Generate a CKB cell verifier with a denial test that mutates the OutPoint.".to_string(),
+                concepts: vec!["CKB cell".to_string(), "OutPoint".to_string()],
+                correct_answer: "The verifier binds the consumed OutPoint to resolved cell data and witness evidence.".to_string(),
+                misunderstanding: "A copied receipt string proves the prior cell without checking transaction lineage.".to_string(),
+                lesson_summary: "The learner studied how CKB cells are consumed and recreated through explicit OutPoint lineage.".to_string(),
             }),
         };
         let seed = AiQuestSeed {
