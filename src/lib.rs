@@ -35,7 +35,7 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 52;
-const QUICK_QUEST_OUTPUT_TOKENS: u16 = 300;
+const QUICK_QUEST_OUTPUT_TOKENS: u16 = 1600;
 const LEARNING_MODULE_OUTPUT_TOKENS: u16 = 700;
 const TUTOR_OUTPUT_TOKENS: u16 = 520;
 
@@ -516,6 +516,8 @@ struct AiQuestSeed {
     d: String,
     i: String,
     a: String,
+    c: String,
+    p: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1838,8 +1840,8 @@ impl OpenAiClient {
             .post_openai_json::<AiQuestSeed>(
                 prompt,
                 QUICK_QUEST_OUTPUT_TOKENS,
-                ReasoningEffort::Minimal,
-                Duration::from_secs(24),
+                ReasoningEffort::None,
+                self.timeout,
             )
             .await?;
 
@@ -2294,12 +2296,8 @@ async fn generate_quest(
             | ApiError::OpenAiStatus { .. }
             | ApiError::InvalidAiResponse),
         ) if learning_context.is_some() => {
-            warn!(%error, "AI lesson-to-quest generation degraded; using lesson compiler");
-            (
-                compile_lesson_quest(&request, run_id)?,
-                QuestSource::CoreFallback,
-                Some("The live AI quest generator was slow or returned unusable JSON, so VibeQuest compiled a fresh practice quest from your completed lesson. Regenerate later for an OpenAI-authored variant.".to_string()),
-            )
+            warn!(%error, "AI lesson-to-quest generation failed; refusing static lesson quest fallback");
+            return Err(error);
         }
         Err(error) => return Err(error),
     };
@@ -2975,7 +2973,8 @@ fn build_quest_from_ai_seed(
     let attack_field = non_empty_or(clamp_text(seed.a, 80), attack_field_for_domain(domain));
     let function_name = function_for_domain(domain);
     let trusted_field = trusted_fields_for_domain(domain);
-    let (implementation, test_content) = quest_files_for_domain(domain, function_name, short_seed);
+    let implementation = ai_generated_quest_file(seed.c, "implementation", short_seed)?;
+    let test_content = ai_generated_quest_file(seed.p, "test", short_seed)?;
     let (implementation_path, test_path) = quest_file_paths_for_domain(domain);
 
     compact_quest_blueprint(QuestBlueprint {
@@ -3044,6 +3043,46 @@ fn build_quest_from_ai_seed(
             },
         ],
     })
+}
+
+fn ai_generated_quest_file(
+    content: String,
+    kind: &str,
+    short_seed: &str,
+) -> Result<String, ApiError> {
+    let trimmed = content.trim();
+    if trimmed.chars().count() < 220 {
+        return Err(ApiError::InvalidAiResponse);
+    }
+
+    let lower = trimmed.to_lowercase();
+    let has_domain_signal = [
+        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "htlc", "channel", "proof",
+        "receipt", "payout", "runid",
+    ]
+    .iter()
+    .any(|term| lower.contains(term));
+    let has_denial_signal = [
+        "reject", "block", "false", "throw", "invalid", "unpaid", "mismatch", "replay",
+    ]
+    .iter()
+    .any(|term| lower.contains(term));
+    let has_code_signal =
+        lower.contains("export") || lower.contains("function") || lower.contains("const");
+    let has_test_signal =
+        lower.contains("test") || lower.contains("expect") || lower.contains("assert");
+
+    let valid = match kind {
+        "implementation" => has_code_signal && has_domain_signal,
+        "test" => has_test_signal && has_domain_signal && has_denial_signal,
+        _ => false,
+    };
+
+    if !valid {
+        return Err(ApiError::InvalidAiResponse);
+    }
+
+    Ok(trimmed.replace("__RUN_SEED__", short_seed))
 }
 
 fn quest_domain_for_request(request: &GenerateQuestRequest, seed: &AiQuestSeed) -> QuestDomain {
@@ -3174,280 +3213,6 @@ fn quest_file_paths_for_domain(domain: QuestDomain) -> (&'static str, &'static s
         QuestDomain::CkbCell => ("src/cellVerifier.ts", "test/cellVerifier.test.ts"),
         _ => ("src/quest.ts", "test/quest.test.ts"),
     }
-}
-
-fn quest_files_for_domain(
-    domain: QuestDomain,
-    function_name: &str,
-    short_seed: &str,
-) -> (String, String) {
-    match domain {
-        QuestDomain::CkbCell => (
-            format!(
-                "export const QUEST_SEED='{short_seed}';\nexport type OutPoint={{txHash:string;index:number}};\nexport type CellClaim={{runId:string;inputIndex:number;outPoint:OutPoint;cellDataHash:string;lockScriptHash:string;typeScriptHash:string}};\nexport type WitnessProof={{runId:string;inputIndex:number;outPoint:OutPoint;cellDataHash:string;lockScriptHash:string;typeScriptHash:string;signature:string}};\nexport function {function_name}(proof:WitnessProof|undefined,claim:CellClaim){{\n  if(!proof)return false;\n  const sameRun=proof.runId===claim.runId&&proof.inputIndex===claim.inputIndex;\n  const sameOutPoint=proof.outPoint.txHash===claim.outPoint.txHash&&proof.outPoint.index===claim.outPoint.index;\n  const sameCellData=proof.cellDataHash===claim.cellDataHash;\n  const sameScripts=proof.lockScriptHash===claim.lockScriptHash&&proof.typeScriptHash===claim.typeScriptHash;\n  const witnessBound=proof.signature.includes(`run:${{claim.runId}}`)&&proof.signature.includes(`input:${{claim.inputIndex}}`)&&proof.signature.includes(`outpoint:${{claim.outPoint.txHash}}:${{claim.outPoint.index}}`)&&proof.signature.includes(`lock:${{claim.lockScriptHash}}`)&&proof.signature.includes(`type:${{claim.typeScriptHash}}`);\n  return sameRun&&sameOutPoint&&sameCellData&&sameScripts&&witnessBound;\n}}"
-            ),
-            format!(
-                "import {{{function_name},type CellClaim,type WitnessProof}} from '../src/cellVerifier';\nconst claim:CellClaim={{runId:'vq-{short_seed}',inputIndex:0,outPoint:{{txHash:'0x{short_seed}',index:0}},cellDataHash:'data:{short_seed}',lockScriptHash:'lock:joyid',typeScriptHash:'type:paywall'}};\nconst proof:WitnessProof={{...claim,signature:'run:vq-{short_seed}|input:0|outpoint:0x{short_seed}:0|lock:lock:joyid|type:type:paywall'}};\ntest('accepts witness bound to exact CKB outpoint, scripts, and run',()=>expect({function_name}(proof,claim)).toBe(true));\ntest('rejects copied witness for another outpoint',()=>expect({function_name}({{...proof,outPoint:{{...proof.outPoint,index:1}}}},claim)).toBe(false));\ntest('rejects replayed run id even with the same outpoint',()=>expect({function_name}({{...proof,runId:'vq-old'}},claim)).toBe(false));\ntest('rejects lock script mismatch before unlock',()=>expect({function_name}({{...proof,lockScriptHash:'lock:attacker'}},claim)).toBe(false));"
-            ),
-        ),
-        QuestDomain::Split => (
-            format!(
-                "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport function {function_name}(receipt:Receipt,claim:Claim){{\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const sameEconomics=receipt.amountXudt===claim.amountXudt&&receipt.creatorBps===claim.creatorBps;\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-');\n  return sameAccess&&sameCell&&sameEconomics&&fiberProof;\n}}\nexport function payoutSplit(amountXudt:bigint,creatorBps:number){{const creator=amountXudt*BigInt(creatorBps)/10000n;return {{creator,protocol:amountXudt-creator}};}}"
-            ),
-            format!(
-                "import {{{function_name},payoutSplit,type Receipt,type Claim}} from '../src/quest';\nconst claim:Claim={{reader:'alice',contentId:'article',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}',amountXudt:1000n,creatorBps:7000}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}'}};\ntest('accepts payout receipt bound to access, CKB cell, Fiber state, and xUDT amount',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('blocks over-claiming by mutating amountXudt',()=>expect({function_name}({{...receipt,amountXudt:999n}},claim)).toBe(false));\ntest('calculates creator split without over-claiming',()=>expect(payoutSplit(1000n,7000).creator).toBe(700n));"
-            ),
-        ),
-        QuestDomain::Witness => (
-            format!(
-                "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string;witness:string;script:string}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string;script:string}};\nexport function {function_name}(receipt:Receipt,claim:Claim){{\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const witnessScope=`cell:${{claim.ckbCell}}|script:${{claim.script}}|run:${{claim.runId}}`;\n  const ckbProof=receipt.ckbCell===claim.ckbCell&&receipt.script===claim.script&&receipt.witness.includes(witnessScope);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-')&&receipt.channelState.includes(claim.ckbCell);\n  return sameAccess&&ckbProof&&fiberProof;\n}}"
-            ),
-            format!(
-                "import {{{function_name},type Receipt,type Claim}} from '../src/quest';\nconst claim:Claim={{reader:'alice',contentId:'article',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}',script:'ckb-script:paywall'}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}',witness:'cell:cell:{short_seed}|script:ckb-script:paywall|run:vq-{short_seed}'}};\ntest('accepts witness and Fiber receipt scoped to the same CKB cell',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('rejects copied witness for another CKB cell',()=>expect({function_name}({{...receipt,ckbCell:'cell:attacker'}},claim)).toBe(false));\ntest('rejects replayed run id even when invoice shape looks valid',()=>expect({function_name}({{...receipt,runId:'vq-old'}},claim)).toBe(false));"
-            ),
-        ),
-        QuestDomain::Settlement => (
-            format!(
-                "export const QUEST_SEED='{short_seed}';\nexport type Event={{eventId:string;invoiceId:string;status:'paid'|'pending';channelState:string;ckbCell:string}};\nexport type Ledger={{processed:Set<string>;invoiceId:string;ckbCell:string}};\nexport function {function_name}(event:Event,ledger:Ledger){{\n  const authentic=event.status==='paid'&&event.invoiceId===ledger.invoiceId;\n  const boundState=event.channelState.includes(event.ckbCell)&&event.ckbCell===ledger.ckbCell;\n  const fresh=!ledger.processed.has(event.eventId);\n  if(!(authentic&&boundState&&fresh))return false;\n  ledger.processed.add(event.eventId);\n  return true;\n}}"
-            ),
-            format!(
-                "import {{{function_name},type Event,type Ledger}} from '../src/quest';\nconst ledger=():Ledger=>({{processed:new Set<string>(),invoiceId:'fiber:invoice-{short_seed}',ckbCell:'cell:{short_seed}'}});\nconst event:Event={{eventId:'evt-{short_seed}',invoiceId:'fiber:invoice-{short_seed}',status:'paid',channelState:'open:cell:{short_seed}',ckbCell:'cell:{short_seed}'}};\ntest('settles paid Fiber event once',()=>expect({function_name}(event,ledger())).toBe(true));\ntest('blocks duplicate settlement eventId',()=>{{const l=ledger();expect({function_name}(event,l)).toBe(true);expect({function_name}(event,l)).toBe(false);}});\ntest('rejects unpaid or wrong CKB state',()=>expect({function_name}({{...event,status:'pending'}},ledger())).toBe(false));"
-            ),
-        ),
-        QuestDomain::Receipt => (
-            format!(
-                "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string}};\nexport function {function_name}(receipt:Receipt|undefined,claim:Claim){{\n  if(!receipt)return false;\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-')&&receipt.channelState.includes(claim.ckbCell);\n  const ckbProof=receipt.ckbCell===claim.ckbCell;\n  return sameAccess&&fiberProof&&ckbProof;\n}}"
-            ),
-            format!(
-                "import {{{function_name},type Receipt,type Claim}} from '../src/quest';\nconst claim:Claim={{reader:'alice',contentId:'article',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}'}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}'}};\ntest('accepts receipt scoped to reader, content, run, and CKB cell',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('blocks missing receipt before paid content unlocks',()=>expect({function_name}(undefined,claim)).toBe(false));\ntest('rejects copied preimage replayed into another run',()=>expect({function_name}({{...receipt,runId:'vq-old'}},claim)).toBe(false));"
-            ),
-        ),
-    }
-}
-
-fn compile_lesson_quest(
-    request: &GenerateQuestRequest,
-    run_id: Uuid,
-) -> Result<QuestBlueprint, ApiError> {
-    let context = request
-        .learning_context
-        .as_ref()
-        .ok_or(ApiError::InvalidAiResponse)?;
-    if is_ckb_cells_lesson_context(context) {
-        return compile_ckb_cell_lesson_quest(request, context, run_id);
-    }
-
-    let lower_prompt = request.build_prompt.to_lowercase();
-    let uses_split = lower_prompt.contains("split")
-        || lower_prompt.contains("xudt")
-        || lower_prompt.contains("payout")
-        || lower_prompt.contains("balance");
-    let uses_witness = lower_prompt.contains("witness")
-        || lower_prompt.contains("cell")
-        || lower_prompt.contains("script")
-        || context.lesson_title.to_lowercase().contains("cell");
-    let seed = run_id.simple().to_string();
-    let short_seed = &seed[..8];
-    let function_name = if uses_split {
-        "verifyPayoutReceipt"
-    } else if uses_witness {
-        "verifyWitnessReceipt"
-    } else {
-        "verifyFiberReceipt"
-    };
-    let title = if uses_split {
-        format!("{} Split Integrity Lab", context.lesson_title)
-    } else if uses_witness {
-        format!("{} Witness Binding Lab", context.lesson_title)
-    } else {
-        format!("{} Replay Defense Lab", context.lesson_title)
-    };
-    let trusted_field = if uses_split {
-        "amountXudt and creatorBps"
-    } else if uses_witness {
-        "ckbCell and witness"
-    } else {
-        "reader, contentId, runId, and channelState"
-    };
-    let attack_field = if uses_split {
-        "amountXudt"
-    } else if uses_witness {
-        "ckbCell"
-    } else {
-        "runId"
-    };
-    let implementation = if uses_split {
-        format!(
-            "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string;amountXudt:bigint;creatorBps:number}};\nexport function {function_name}(receipt:Receipt,claim:Claim){{\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const sameEconomics=receipt.amountXudt===claim.amountXudt&&receipt.creatorBps===claim.creatorBps;\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-');\n  return sameAccess&&sameCell&&sameEconomics&&fiberProof;\n}}\nexport function payoutSplit(amountXudt:bigint,creatorBps:number){{const creator=amountXudt*BigInt(creatorBps)/10000n;return {{creator,protocol:amountXudt-creator}};}}"
-        )
-    } else if uses_witness {
-        format!(
-            "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string;witness:string;script:string}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string;script:string}};\nexport function {function_name}(receipt:Receipt,claim:Claim){{\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const witnessScope=`cell:${{claim.ckbCell}}|script:${{claim.script}}|run:${{claim.runId}}`;\n  const ckbProof=receipt.ckbCell===claim.ckbCell&&receipt.script===claim.script&&receipt.witness.includes(witnessScope);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-')&&receipt.channelState.includes(claim.ckbCell);\n  return sameAccess&&ckbProof&&fiberProof;\n}}"
-        )
-    } else {
-        format!(
-            "export const QUEST_SEED='{short_seed}';\nexport type Receipt={{reader:string;contentId:string;runId:string;invoice:string;preimage:string;channelState:string;ckbCell:string}};\nexport type Claim={{reader:string;contentId:string;runId:string;ckbCell:string}};\nexport function {function_name}(receipt:Receipt|undefined,claim:Claim){{\n  if(!receipt)return false;\n  const sameAccess=receipt.reader===claim.reader&&receipt.contentId===claim.contentId&&receipt.runId===claim.runId;\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-')&&receipt.channelState.includes(claim.ckbCell);\n  const ckbProof=receipt.ckbCell===claim.ckbCell;\n  return sameAccess&&fiberProof&&ckbProof;\n}}"
-        )
-    };
-    let test_content = if uses_split {
-        format!(
-            "import {{{function_name},payoutSplit,type Receipt,type Claim}} from '../src/lessonQuest';\nconst claim:Claim={{reader:'alice',contentId:'lesson',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}',amountXudt:1000n,creatorBps:7000}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}'}};\ntest('accepts receipt bound to access, CKB cell, Fiber state, and xUDT amount',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('blocks missing or wrong economic proof',()=>expect({function_name}({{...receipt,amountXudt:999n}},claim)).toBe(false));\ntest('calculates creator split without over-claiming',()=>expect(payoutSplit(1000n,7000).creator).toBe(700n));"
-        )
-    } else if uses_witness {
-        format!(
-            "import {{{function_name},type Receipt,type Claim}} from '../src/lessonQuest';\nconst claim:Claim={{reader:'alice',contentId:'lesson',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}',script:'ckb-script:paywall'}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}',witness:'cell:cell:{short_seed}|script:ckb-script:paywall|run:vq-{short_seed}'}};\ntest('accepts witness and Fiber receipt scoped to the same CKB cell',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('rejects copied witness for another CKB cell',()=>expect({function_name}({{...receipt,ckbCell:'cell:attacker'}},claim)).toBe(false));\ntest('rejects replayed run id even when invoice shape looks valid',()=>expect({function_name}({{...receipt,runId:'vq-old'}},claim)).toBe(false));"
-        )
-    } else {
-        format!(
-            "import {{{function_name},type Receipt,type Claim}} from '../src/lessonQuest';\nconst claim:Claim={{reader:'alice',contentId:'lesson',runId:'vq-{short_seed}',ckbCell:'cell:{short_seed}'}};\nconst receipt:Receipt={{...claim,invoice:'fiber:invoice-{short_seed}',preimage:'HTLC-proof-{short_seed}',channelState:'open:cell:{short_seed}'}};\ntest('accepts receipt scoped to reader, content, run, and CKB cell',()=>expect({function_name}(receipt,claim)).toBe(true));\ntest('blocks missing receipt before paid content unlocks',()=>expect({function_name}(undefined,claim)).toBe(false));\ntest('rejects copied preimage replayed into another run',()=>expect({function_name}({{...receipt,runId:'vq-old'}},claim)).toBe(false));"
-        )
-    };
-
-    compact_quest_blueprint(QuestBlueprint {
-        title,
-        premise: format!(
-            "This practice quest was compiled from lesson '{}' after checkpoint '{}'. It turns the lesson into a concrete verifier, denial tests, and an explanation challenge.",
-            context.lesson_title, context.checkpoint_question
-        ),
-        build_objective: clamp_text(request.build_prompt.clone(), 420),
-        comprehension_gates: vec![
-            format!("Explain which generated fields are trusted: {trusted_field}."),
-            format!("Verify the denial test mutates {attack_field} instead of only testing the happy path."),
-            "Ship only after you can explain CKB state versus local/Fiber receipt checks.".to_string(),
-        ],
-        boss_fight: format!(
-            "In {function_name}, prove that {trusted_field} are scoped to this lesson run. Then explain why mutating {attack_field} blocks replay or over-claiming."
-        ),
-        challenge_brief: Some(QuestChallengeBrief {
-            question: format!(
-                "In this generated lesson quest, what must {function_name} prove before paid access or rewards are safe?"
-            ),
-            correct_answer: format!(
-                "It must bind {trusted_field} to the current reader/content/run and reject the denial test that mutates {attack_field}."
-            ),
-            wrong_answers: vec![
-                ChallengeWrongAnswer {
-                    label: "Trust the Fiber preimage by itself because it starts with HTLC-proof.".to_string(),
-                    feedback: "A copied preimage is not enough; the verifier must bind it to reader, content, run, CKB cell, and channel state.".to_string(),
-                },
-                ChallengeWrongAnswer {
-                    label: "Trust the frontend route because only paid users can click it.".to_string(),
-                    feedback: "Frontend state can be bypassed. The backend/verifier must enforce the proof boundary.".to_string(),
-                },
-                ChallengeWrongAnswer {
-                    label: "Ship because the happy-path receipt passes.".to_string(),
-                    feedback: "The learning goal is the denial path: mutate the trusted field and prove the generated verifier rejects it.".to_string(),
-                },
-            ],
-            invariant: format!("{trusted_field} must match the exact claim being unlocked."),
-            attack_scenario: format!(
-                "An attacker copies a valid-looking receipt and changes {attack_field} to unlock the wrong content, run, CKB cell, or payout."
-            ),
-            code_focus: format!("Trace the accepting branch inside src/lessonQuest.ts::{function_name}."),
-            test_focus: format!("Inspect test/lessonQuest.test.ts where {attack_field} is mutated."),
-            hint: "Name every field the verifier trusts, then map each one to a denial case.".to_string(),
-            follow_up_question: format!(
-                "Which extra denial test would you add after mutating {attack_field}, and why?"
-            ),
-            resources: default_learning_resources().into_iter().take(2).collect(),
-        }),
-        reward_logic: "XP unlocks after code inspection, generated-file checks, and a boss answer that defends the exact invariant.".to_string(),
-        ckb_fiber_hooks: vec![
-            format!("CKB side: validate cell/script/witness assumptions from lesson '{}'.", context.lesson_title),
-            "Fiber side: bind invoice/preimage/channel state to the current access claim.".to_string(),
-        ],
-        workbench_files: vec![
-            WorkbenchFile {
-                path: "src/lessonQuest.ts".to_string(),
-                language: "ts".to_string(),
-                content: implementation,
-            },
-            WorkbenchFile {
-                path: "test/lessonQuest.test.ts".to_string(),
-                language: "ts".to_string(),
-                content: test_content,
-            },
-        ],
-    })
-}
-
-fn compile_ckb_cell_lesson_quest(
-    request: &GenerateQuestRequest,
-    context: &LearningQuestLink,
-    run_id: Uuid,
-) -> Result<QuestBlueprint, ApiError> {
-    let domain = QuestDomain::CkbCell;
-    let seed = run_id.simple().to_string();
-    let short_seed = &seed[..8];
-    let function_name = function_for_domain(domain);
-    let trusted_field = trusted_fields_for_domain(domain);
-    let attack_field = attack_field_for_domain(domain);
-    let invariant = invariant_for_domain(domain);
-    let (implementation, test_content) = quest_files_for_domain(domain, function_name, short_seed);
-    let (implementation_path, test_path) = quest_file_paths_for_domain(domain);
-
-    compact_quest_blueprint(QuestBlueprint {
-        title: format!("{} Cell Verifier Quest", context.lesson_title),
-        premise: format!(
-            "This quest comes from the reviewed CKB Cells path. It turns lesson '{}' into a verifier that checks exact cell lineage, script assumptions, witness binding, and replay resistance.",
-            context.lesson_title
-        ),
-        build_objective: clamp_text(request.build_prompt.clone(), 420),
-        comprehension_gates: vec![
-            "Trace the accepted CKB cell from OutPoint to lock/type script hashes.".to_string(),
-            "Run denial tests that mutate outPoint, runId, and lockScriptHash.".to_string(),
-            "Explain which facts are proven by CKB transaction data versus checked locally in the verifier.".to_string(),
-        ],
-        boss_fight: format!(
-            "In {function_name}, prove this invariant: {invariant}. Then explain why mutating {attack_field} blocks a copied witness from authorizing the wrong cell."
-        ),
-        challenge_brief: Some(QuestChallengeBrief {
-            question: format!(
-                "Which proof boundary must {function_name} defend before this CKB Cell quest can be completed?"
-            ),
-            correct_answer: format!(
-                "It must bind {trusted_field} to the same transaction input and reject the denial tests that mutate {attack_field}, runId, and lockScriptHash."
-            ),
-            wrong_answers: vec![
-                ChallengeWrongAnswer {
-                    label: "Only check that JoyID connected before reading cell data.".to_string(),
-                    feedback: "Wallet connection identifies the learner, but it does not prove this transaction input, OutPoint, or script state is authorized.".to_string(),
-                },
-                ChallengeWrongAnswer {
-                    label: "Accept witness.includes(cellId) because it mentions the expected cell.".to_string(),
-                    feedback: "A substring check is copyable. The witness must bind run id, input index, outpoint, and script hashes together.".to_string(),
-                },
-                ChallengeWrongAnswer {
-                    label: "Trust a Fiber preimage without checking CKB cell lineage.".to_string(),
-                    feedback: "Fiber payment evidence still needs to map back to the exact CKB-backed state being unlocked.".to_string(),
-                },
-            ],
-            invariant: invariant.to_string(),
-            attack_scenario: "An attacker copies a witness from a valid transaction and swaps the OutPoint or run id so a different cell appears authorized.".to_string(),
-            code_focus: format!("Trace {implementation_path}::{function_name}, especially sameOutPoint, sameScripts, and witnessBound."),
-            test_focus: format!("Inspect {test_path}; each denial test mutates a trusted CKB field."),
-            hint: "Follow the cell: OutPoint -> data hash -> lock/type script hashes -> witness signature fields.".to_string(),
-            follow_up_question: "Which single field would you mutate first to prove the verifier is not accepting a copied witness?".to_string(),
-            resources: ckb_cells_learning_resources().into_iter().take(3).collect(),
-        }),
-        reward_logic: "XP unlocks after the learner proves the generated cell verifier rejects copied witness, wrong OutPoint, stale run id, and script mismatch cases.".to_string(),
-        ckb_fiber_hooks: vec![
-            "CKB side: OutPoint, cell data hash, lock script hash, type script hash, and witness binding define the proof boundary.".to_string(),
-            "Fiber side: future payout or paid-access quests must map payment state back to this exact CKB-backed claim.".to_string(),
-        ],
-        workbench_files: vec![
-            WorkbenchFile {
-                path: implementation_path.to_string(),
-                language: "ts".to_string(),
-                content: implementation,
-            },
-            WorkbenchFile {
-                path: test_path.to_string(),
-                language: "ts".to_string(),
-                content: test_content,
-            },
-        ],
-    })
 }
 
 fn compact_quest_blueprint(mut quest: QuestBlueprint) -> Result<QuestBlueprint, ApiError> {
@@ -3928,26 +3693,6 @@ where
     })
 }
 
-fn ckb_cells_learning_resources() -> Vec<LearningResource> {
-    vec![
-        LearningResource {
-            title: "CKB Docs".to_string(),
-            url: "https://docs.nervos.org/".to_string(),
-            reason: "Use this as the primary reference for CKB cells, transactions, scripts, and witnesses.".to_string(),
-        },
-        LearningResource {
-            title: "Nervos CKB Repository".to_string(),
-            url: "https://github.com/nervosnetwork/ckb".to_string(),
-            reason: "Reference the node implementation and ecosystem source when moving from concepts to deeper protocol study.".to_string(),
-        },
-        LearningResource {
-            title: "CKB RFCs".to_string(),
-            url: "https://github.com/nervosnetwork/rfcs".to_string(),
-            reason: "Use RFCs for deeper design context when studying CKB cells, scripts, and transaction validation.".to_string(),
-        },
-    ]
-}
-
 fn default_learning_resources() -> Vec<LearningResource> {
     vec![
         LearningResource {
@@ -4158,7 +3903,7 @@ fn compact_ai_lesson_to_learning_lesson(
     }
 
     let concepts = infer_learning_concepts(focus, &lesson);
-    let correct_index = lesson.ci.min(3);
+    let correct_index = checkpoint_correct_index(index, lesson.ci);
     let correct_option = LearningOption {
         label: correct_answer,
         feedback: format!(
@@ -4255,6 +4000,11 @@ fn checkpoint_explanation_for_lesson(
         lesson.a.trim(),
         concept_list,
     )
+}
+
+fn checkpoint_correct_index(lesson_index: usize, model_index: usize) -> usize {
+    let jitter = Uuid::new_v4().as_bytes()[0] as usize;
+    (model_index.min(3) + lesson_index + jitter) % 4
 }
 
 fn learning_wrong_options(
@@ -4369,7 +4119,13 @@ fn learning_module_prompt(request: &GenerateLearningModuleRequest) -> String {
     };
     let focus_directive = match request.path_id.as_deref() {
         Some(path_id) if path_id.eq_ignore_ascii_case("ckb-cells") => {
-            "Focus on CKB cell state, OutPoint lineage, lock/type scripts, witnesses, transaction evidence, local verifier trust boundaries, and lesson-to-quest handoff. Author fresh lesson titles and examples for this learner; do not reuse canned lesson names."
+            "Focus on CKB cell state, OutPoint lineage, lock/type scripts, witnesses, transaction evidence, local verifier trust boundaries, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
+        }
+        Some(path_id) if path_id.eq_ignore_ascii_case("fiber-payments") => {
+            "Focus on Fiber payment channels, invoices, HTLC preimages, channel state, paid-access receipts, CKB settlement assumptions, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
+        }
+        Some(path_id) if path_id.eq_ignore_ascii_case("security-audits") => {
+            "Focus on replay defense, witness mismatch, stale Fiber state, JoyID proof scope, xUDT payout integrity, denial tests, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
         }
         _ => {
             "Tailor the path to the learner's selected interests. Author fresh lesson titles, examples, code lenses, and checkpoint misunderstandings for this exact goal."
@@ -4377,7 +4133,7 @@ fn learning_module_prompt(request: &GenerateLearningModuleRequest) -> String {
     };
 
     format!(
-        r#"Return minified JSON only. Keys t,l. l exactly 5 objects with keys t,e,s,q,a,b,ci. Topic: CKB/Fiber/JoyID learning for vibecoders. Interests: {interests}. Goal: {goal}. Background: {background}. Pace: {pace}. Focus directive: {focus_directive}. Seed: {nonce}. Each lesson must be AI-authored for this exact learner, code-aware, and different from the others. e must be a 22-36 word learner-specific concept seed with concrete CKB/Fiber/JoyID detail, one failure mode, and one denial-test idea. s one TypeScript or Rust code lens line. q a checkpoint about the lesson's generated-code trust boundary. a the correct answer. b exactly 3 plausible wrong answer labels. ci integer 0-3; vary the correct answer position naturally. No markdown."#,
+        r#"Return minified JSON only. Keys t,l. l exactly 5 objects with keys t,e,s,q,a,b,ci. Topic: CKB/Fiber/JoyID learning for vibecoders. Interests: {interests}. Goal: {goal}. Background: {background}. Pace: {pace}. Focus directive: {focus_directive}. Seed: {nonce}. Each lesson must be AI-authored for this exact learner, code-aware, and different from the others. e must be a 22-36 word learner-specific concept seed with concrete CKB/Fiber/JoyID detail, one failure mode, and one denial-test idea. s one TypeScript or Rust code lens line. q a checkpoint about the lesson's generated-code trust boundary, written from that lesson's exact concept seed and code lens. a the correct answer. b exactly 3 plausible wrong answer labels that reveal different misunderstandings. ci integer 0-3; do not always use 0. No markdown."#,
         goal = request.learner_goal.trim(),
         background = request.background.trim(),
         pace = request.pace.trim(),
@@ -4527,7 +4283,7 @@ fn quest_prompt(
         })
         .unwrap_or_else(|| "Learning source: direct quest request.".to_string());
     format!(
-        r#"Return minified JSON only. Keys t,d,i,a. t quest title. d one of ckb-cell,receipt,witness,split,settlement. i invariant max 18 words. a attack field max 3 words. Request: {build_prompt}. Skill track: {track}. Difficulty: {difficulty:?}. {learning_context} Seed: {nonce}. Pick a domain that best matches the request and lesson. No markdown."#
+        r#"Return minified JSON only. Keys t,d,i,a,c,p. t quest title. d one of ckb-cell,receipt,witness,split,settlement. i invariant max 18 words. a attack field max 3 words. c TypeScript implementation file, 35 lines max, export types and one verifier function. p TypeScript test file, 28 lines max, import from ../src/quest, include one passing test and two denial tests that mutate the trusted field. Request: {build_prompt}. Skill track: {track}. Difficulty: {difficulty:?}. {learning_context} Seed: {nonce}. Use __RUN_SEED__ where a unique id is needed. Code must match the request and lesson; no markdown."#
     )
 }
 
@@ -4572,10 +4328,30 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use p256::ecdsa::{SigningKey, signature::Signer as _};
+
+    fn ai_impl_fixture() -> String {
+        "export type Receipt={reader:string;contentId:string;runId:string;ckbCell:string;invoice:string;preimage:string;channelState:string};\nexport type Claim={reader:string;contentId:string;runId:string;ckbCell:string};\nexport function verifyGeneratedReceipt(receipt:Receipt|undefined,claim:Claim){\n  if(!receipt)return false;\n  const sameReader=receipt.reader===claim.reader;\n  const sameContent=receipt.contentId===claim.contentId;\n  const sameRun=receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-');\n  return sameReader&&sameContent&&sameRun&&sameCell&&fiberProof;\n}".to_string()
+    }
+
+    fn ai_test_fixture() -> String {
+        "import {verifyGeneratedReceipt,type Receipt,type Claim} from '../src/quest';\nconst claim:Claim={reader:'alice',contentId:'lesson',runId:'vq-__RUN_SEED__',ckbCell:'cell:__RUN_SEED__'};\nconst receipt:Receipt={...claim,invoice:'fiber:invoice-__RUN_SEED__',preimage:'HTLC-proof-__RUN_SEED__',channelState:'open:cell:__RUN_SEED__'};\ntest('accepts Fiber receipt bound to reader content run and CKB cell',()=>expect(verifyGeneratedReceipt(receipt,claim)).toBe(true));\ntest('rejects replay with wrong run id',()=>expect(verifyGeneratedReceipt({...receipt,runId:'vq-old'},claim)).toBe(false));\ntest('blocks mismatched CKB cell state',()=>expect(verifyGeneratedReceipt({...receipt,ckbCell:'cell:attacker'},claim)).toBe(false));".to_string()
+    }
+
+    fn ai_seed_json(title: &str, domain: &str, invariant: &str, attack: &str) -> String {
+        serde_json::json!({
+            "t": title,
+            "d": domain,
+            "i": invariant,
+            "a": attack,
+            "c": ai_impl_fixture(),
+            "p": ai_test_fixture(),
+        })
+        .to_string()
+    }
     #[test]
     fn parses_openai_output_text() {
         let body = serde_json::json!({
-            "output_text": "{\"t\":\"Receipt Raid\",\"d\":\"receipt\",\"i\":\"receipt binds reader and run\",\"a\":\"runId\"}",
+            "output_text": ai_seed_json("Receipt Raid", "receipt", "receipt binds reader and run", "runId"),
             "output": null
         })
         .to_string();
@@ -4584,6 +4360,7 @@ mod tests {
 
         assert_eq!(parsed.t, "Receipt Raid");
         assert_eq!(parsed.d, "receipt");
+        assert!(parsed.c.contains("verifyGeneratedReceipt"));
     }
 
     #[test]
@@ -4593,7 +4370,7 @@ mod tests {
             "output": [{
                 "content": [{
                     "type": "output_text",
-                    "text": "{\"t\":\"Witness Lab\",\"d\":\"witness\",\"i\":\"witness binds CKB cell\",\"a\":\"ckbCell\"}"
+                    "text": ai_seed_json("Witness Lab", "witness", "witness binds CKB cell", "ckbCell")
                 }]
             }]
         })
@@ -4602,12 +4379,15 @@ mod tests {
         let parsed = parse_openai_json_response::<AiQuestSeed>(&body).unwrap();
 
         assert_eq!(parsed.a, "ckbCell");
+        assert!(parsed.p.contains("rejects replay"));
     }
 
     #[test]
     fn parses_openai_json_when_provider_wraps_text() {
         let body = serde_json::json!({
-            "output_text": "Here is the quest seed:\n{\"t\":\"Split Lab\",\"d\":\"split\",\"i\":\"xUDT split matches claim\",\"a\":\"amountXudt\"}\nDone.",
+            "output_text": format!("Here is the quest seed:
+{}
+Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXudt")),
             "output": null
         })
         .to_string();
@@ -4632,6 +4412,8 @@ mod tests {
             d: "receipt".to_string(),
             i: "receipt binds paid read before payout".to_string(),
             a: "runId".to_string(),
+            c: ai_impl_fixture(),
+            p: ai_test_fixture(),
         };
 
         let quest = build_quest_from_ai_seed(&request, seed, Uuid::new_v4()).unwrap();
@@ -4646,40 +4428,6 @@ mod tests {
         assert!(workspace.contains("fiber"));
         assert!(workspace.contains("ckb"));
         assert!(workspace.contains("rejects") || workspace.contains("blocks"));
-    }
-
-    #[test]
-    fn ckb_cells_lesson_compiles_cell_verifier_workspace() {
-        let request = GenerateQuestRequest {
-            build_prompt: "Generate the CKB Cell verifier quest from the completed lesson"
-                .to_string(),
-            skill_track: Some("CKB Foundations".to_string()),
-            difficulty: Some(Difficulty::Builder),
-            wallet: joyid_wallet_fixture(),
-            learning_context: Some(LearningQuestLink {
-                module_id: "ckb-cells".to_string(),
-                lesson_id: "ckb-cells-lesson-5".to_string(),
-                module_title: "AI CKB Cells Focus".to_string(),
-                lesson_title: "AI Generated Cell Verifier Lesson".to_string(),
-                checkpoint_question: "Which field would you mutate first?".to_string(),
-            }),
-        };
-
-        let quest = compile_lesson_quest(&request, Uuid::new_v4()).unwrap();
-        let implementation = &quest.workbench_files[0];
-        let test_file = &quest.workbench_files[1];
-        let workspace = format!("{}\n{}", implementation.content, test_file.content).to_lowercase();
-
-        assert_eq!(implementation.path, "src/cellVerifier.ts");
-        assert_eq!(test_file.path, "test/cellVerifier.test.ts");
-        assert!(workspace.contains("verifyckbcellproof"));
-        assert!(workspace.contains("outpoint"));
-        assert!(workspace.contains("lockscript"));
-        assert!(workspace.contains("typescripthash"));
-        assert!(workspace.contains("witnessbound"));
-        assert!(workspace.contains("rejects copied witness"));
-        assert!(workspace.contains("rejects replayed run id"));
-        assert!(workspace.contains("rejects lock script mismatch"));
     }
 
     #[test]
@@ -4702,6 +4450,8 @@ mod tests {
             d: "receipt".to_string(),
             i: "receipt binds a paid action".to_string(),
             a: "runId".to_string(),
+            c: ai_impl_fixture(),
+            p: ai_test_fixture(),
         };
 
         let quest = build_quest_from_ai_seed(&request, seed, Uuid::new_v4()).unwrap();
@@ -4714,8 +4464,8 @@ mod tests {
 
         assert!(workspace.contains("src/cellverifier.ts"));
         assert!(workspace.contains("test/cellverifier.test.ts"));
-        assert!(workspace.contains("outpoint"));
-        assert!(workspace.contains("inputindex"));
+        assert!(workspace.contains("verifygeneratedreceipt"));
+        assert!(workspace.contains("rejects replay"));
     }
 
     #[test]
