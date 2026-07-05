@@ -34,9 +34,9 @@ use uuid::Uuid;
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
-const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 52;
+const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 90;
 const QUICK_QUEST_OUTPUT_TOKENS: u16 = 1600;
-const LEARNING_MODULE_OUTPUT_TOKENS: u16 = 700;
+const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 1550;
 const TUTOR_OUTPUT_TOKENS: u16 = 520;
 
 #[derive(Clone)]
@@ -159,7 +159,7 @@ struct LearningQuestLink {
     checkpoint_question: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GenerateLearningModuleRequest {
     #[serde(default)]
     path_id: Option<String>,
@@ -169,11 +169,47 @@ struct GenerateLearningModuleRequest {
     pace: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GenerateLearningLessonRequest {
+    #[serde(default)]
+    path_id: Option<String>,
+    interests: Vec<String>,
+    learner_goal: String,
+    background: String,
+    pace: String,
+    lesson_index: usize,
+}
+
+impl GenerateLearningLessonRequest {
+    fn module_request(&self) -> GenerateLearningModuleRequest {
+        GenerateLearningModuleRequest {
+            path_id: self.path_id.clone(),
+            interests: self.interests.clone(),
+            learner_goal: self.learner_goal.clone(),
+            background: self.background.clone(),
+            pace: self.pace.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct GenerateLearningModuleResponse {
     module_id: Uuid,
     source: QuestSource,
     module: LearningModule,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateLearningLessonResponse {
+    source: QuestSource,
+    module_title: String,
+    learner_profile: String,
+    outcome: String,
+    capstone_quest_prompt: String,
+    resources: Vec<LearningResource>,
+    lesson: LearningLesson,
+    lesson_index: usize,
     warning: Option<String>,
 }
 
@@ -231,10 +267,15 @@ struct AiLearningLessonCompact {
     t: String,
     e: String,
     s: String,
+    w: String,
+    j: String,
+    f: String,
     q: String,
     a: String,
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     b: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    bf: Vec<String>,
     #[serde(default)]
     ci: usize,
 }
@@ -1741,6 +1782,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/quests/{run_id}/complete", post(complete_quest))
         .route("/ai/quests/generate", post(generate_quest))
         .route("/ai/learning/module", post(generate_learning_module))
+        .route(
+            "/ai/learning/lesson",
+            post(generate_learning_lesson_endpoint),
+        )
         .route("/ai/learning/tutor", post(answer_learning_question))
         .route("/ai/code/tutor", post(answer_code_question))
         .layer(cors_layer(&state.config))
@@ -1852,17 +1897,95 @@ impl OpenAiClient {
         &self,
         request: &GenerateLearningModuleRequest,
     ) -> Result<LearningModule, ApiError> {
-        let prompt = learning_module_prompt(request);
-        let compact = self
-            .post_openai_json::<AiLearningModuleCompact>(
-                prompt,
-                LEARNING_MODULE_OUTPUT_TOKENS,
-                ReasoningEffort::None,
-                self.timeout,
-            )
-            .await?;
+        let mut lessons = Vec::with_capacity(5);
+        for lesson_index in 0..5 {
+            lessons.push(self.generate_learning_lesson(request, lesson_index).await?);
+        }
+        let compact = AiLearningModuleCompact {
+            t: learning_module_title(request),
+            l: lessons,
+        };
 
         build_learning_module_from_compact_ai(request, compact)
+    }
+
+    async fn generate_learning_lesson_item(
+        &self,
+        request: &GenerateLearningModuleRequest,
+        lesson_index: usize,
+    ) -> Result<LearningLesson, ApiError> {
+        let compact = self.generate_learning_lesson(request, lesson_index).await?;
+        compact_ai_lesson_to_learning_lesson(
+            lesson_index,
+            &learning_background_label(request),
+            &learning_focus_label(request),
+            compact,
+        )
+    }
+
+    async fn generate_learning_lesson(
+        &self,
+        request: &GenerateLearningModuleRequest,
+        lesson_index: usize,
+    ) -> Result<AiLearningLessonCompact, ApiError> {
+        match self
+            .request_learning_lesson(request, lesson_index, false)
+            .await
+        {
+            Ok(lesson) => Ok(lesson),
+            Err(error) => {
+                match &error {
+                    ApiError::OpenAiTransport(detail) => {
+                        warn!(%detail, lesson_index, "AI lesson transport failed");
+                    }
+                    ApiError::OpenAiStatus { status, body } => {
+                        warn!(%status, body = %clamp_text(body.clone(), 300), lesson_index, "AI lesson provider returned error status");
+                    }
+                    ApiError::InvalidAiResponse => {
+                        warn!(lesson_index, "AI lesson response failed validation");
+                    }
+                    _ => warn!(%error, lesson_index, "AI lesson generation failed"),
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn request_learning_lesson(
+        &self,
+        request: &GenerateLearningModuleRequest,
+        lesson_index: usize,
+        repair: bool,
+    ) -> Result<AiLearningLessonCompact, ApiError> {
+        let prompt = learning_lesson_prompt(request, lesson_index, repair);
+        let lesson_timeout = if self.timeout > Duration::from_secs(45) {
+            Duration::from_secs(45)
+        } else {
+            self.timeout
+        };
+        let lesson = self
+            .post_openai_json::<AiLearningLessonCompact>(
+                prompt,
+                LEARNING_LESSON_OUTPUT_TOKENS,
+                ReasoningEffort::None,
+                lesson_timeout,
+            )
+            .await?;
+        if let Err(error) = validate_ai_learning_lesson_compact(&lesson) {
+            warn!(
+                lesson_index,
+                title = %clamp_text(lesson.t.clone(), 120),
+                explainer_words = lesson.e.split_whitespace().count(),
+                why_words = lesson.w.split_whitespace().count(),
+                bridge_words = lesson.j.split_whitespace().count(),
+                wrong_answers = lesson.b.len(),
+                wrong_feedback = lesson.bf.len(),
+                question = %clamp_text(lesson.q.clone(), 180),
+                "AI lesson failed quality gate"
+            );
+            return Err(error);
+        }
+        Ok(lesson)
     }
 
     async fn post_openai_json<T>(
@@ -2373,6 +2496,37 @@ async fn generate_learning_module(
         module_id: Uuid::new_v4(),
         source,
         module,
+        warning: None,
+    }))
+}
+
+async fn generate_learning_lesson_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<GenerateLearningLessonRequest>,
+) -> Result<Json<GenerateLearningLessonResponse>, ApiError> {
+    let module_request = request.module_request();
+    if module_request.learner_goal.trim().chars().count() < 8 && module_request.interests.is_empty()
+    {
+        return Err(ApiError::InvalidPrompt);
+    }
+    if request.lesson_index >= 5 {
+        return Err(ApiError::InvalidPrompt);
+    }
+
+    let lesson = state
+        .openai
+        .generate_learning_lesson_item(&module_request, request.lesson_index)
+        .await?;
+
+    Ok(Json(GenerateLearningLessonResponse {
+        source: QuestSource::OpenAi,
+        module_title: learning_module_title(&module_request),
+        learner_profile: learning_module_profile(&module_request),
+        outcome: learning_module_outcome(&module_request),
+        capstone_quest_prompt: learning_module_capstone_prompt(&module_request),
+        resources: default_learning_resources(),
+        lesson,
+        lesson_index: request.lesson_index,
         warning: None,
     }))
 }
@@ -2980,7 +3134,7 @@ fn build_quest_from_ai_seed(
     compact_quest_blueprint(QuestBlueprint {
         title,
         premise: format!(
-            "OpenAI selected a {domain_name} quest seed; VibeQuest turns it into a verifier, denial tests, and a boss challenge so the learner can inspect instead of blindly ship.",
+            "OpenAI generated a {domain_name} quest with verifier code, denial tests, and a boss challenge so the learner can inspect instead of blindly ship.",
             domain_name = domain_label(domain)
         ),
         build_objective: clamp_text(request.build_prompt.clone(), 420),
@@ -3057,8 +3211,8 @@ fn ai_generated_quest_file(
 
     let lower = trimmed.to_lowercase();
     let has_domain_signal = [
-        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "htlc", "channel", "proof",
-        "receipt", "payout", "runid",
+        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
+        "proof", "receipt", "payout", "runid",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -3307,8 +3461,8 @@ fn validate_quest_quality(quest: &QuestBlueprint) -> Result<(), ApiError> {
             || haystack.contains("throws")
     });
     let has_domain_signal = [
-        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "htlc", "channel", "proof",
-        "receipt", "payout",
+        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
+        "proof", "receipt", "payout",
     ]
     .iter()
     .any(|term| workspace.contains(term));
@@ -3326,8 +3480,8 @@ fn validate_quest_quality(quest: &QuestBlueprint) -> Result<(), ApiError> {
     .iter()
     .any(|term| workspace.contains(term));
     let has_specific_challenge = [
-        "cell", "witness", "script", "xudt", "fiber", "invoice", "htlc", "channel", "proof",
-        "receipt", "payout", "reader", "run", "content",
+        "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
+        "proof", "receipt", "payout", "reader", "run", "content",
     ]
     .iter()
     .any(|term| workspace.contains(term) && challenge_text.contains(term));
@@ -3598,7 +3752,7 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
             lesson.id = format!("lesson-{}", index + 1);
         }
         lesson.title = clamp_text(lesson.title.clone(), 80);
-        lesson.why_it_matters = clamp_text(lesson.why_it_matters.clone(), 260);
+        lesson.why_it_matters = clamp_text(lesson.why_it_matters.clone(), 620);
         lesson.explanation = clamp_text(lesson.explanation.clone(), 3200);
         lesson.quest_bridge = clamp_text(lesson.quest_bridge.clone(), 280);
         if lesson.concepts.len() > 5 {
@@ -3704,12 +3858,12 @@ fn default_learning_resources() -> Vec<LearningResource> {
         LearningResource {
             title: "Fiber Network Repository".to_string(),
             url: "https://github.com/nervosnetwork/fiber".to_string(),
-            reason: "Reference payment channels, invoices, HTLCs, routing, and node behavior."
+            reason: "Reference Fiber payment channels, invoices, PTLC-based security, routing, and node behavior."
                 .to_string(),
         },
         LearningResource {
             title: "JoyID Documentation".to_string(),
-            url: "https://docs.joy.id/".to_string(),
+            url: "https://docs.joyid.dev/".to_string(),
             reason: "Reference passkey wallet flows and signer identity assumptions.".to_string(),
         },
     ]
@@ -3861,57 +4015,89 @@ fn build_learning_module_from_compact_ai(
             compact.t,
             &format!("VibeQuest: {} Deep Dive", clamp_text(focus.clone(), 52)),
         ),
-        learner_profile: format!(
-            "A {background} learning {focus} through live AI-authored lesson seeds expanded into deep code-aware modules, code snippets, checkpoints, tutor support, and practical quest handoffs."
-        ),
-        outcome: format!(
-            "Explain {focus} trust boundaries, read generated verifier code, answer code-aware checkpoints, and turn passed lessons into quests."
-        ),
+        learner_profile: learning_module_profile(request),
+        outcome: learning_module_outcome(request),
         lessons,
-        capstone_quest_prompt: format!(
-            "Generate a {focus} verifier quest with proof binding, denial tests, a boss question, and a reward-safe ship gate."
-        ),
+        capstone_quest_prompt: learning_module_capstone_prompt(request),
         resources: default_learning_resources(),
     })
 }
 
-fn compact_ai_lesson_to_learning_lesson(
-    index: usize,
-    background: &str,
-    focus: &str,
-    lesson: AiLearningLessonCompact,
-) -> Result<LearningLesson, ApiError> {
-    let title = lesson.t.trim().to_string();
-    let explainer = lesson.e.trim().to_string();
-    let code_lens = lesson.s.trim().to_string();
-    let question = lesson.q.trim().to_string();
-    let correct_answer = lesson.a.trim().to_string();
+fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Result<(), ApiError> {
     let wrong_answer_count = lesson
         .b
         .iter()
         .filter(|label| !label.trim().is_empty())
         .count();
+    let wrong_feedback_count = lesson
+        .bf
+        .iter()
+        .filter(|feedback| !feedback.trim().is_empty())
+        .count();
 
-    if title.is_empty()
-        || explainer.split_whitespace().count() < 18
-        || code_lens.is_empty()
-        || question.is_empty()
-        || correct_answer.is_empty()
+    let explainer_words = lesson.e.split_whitespace().count();
+    let why_words = lesson.w.split_whitespace().count();
+    let bridge_words = lesson.j.split_whitespace().count();
+
+    if lesson.t.trim().is_empty()
+        || explainer_words < 300
+        || lesson.s.trim().is_empty()
+        || why_words < 35
+        || bridge_words < 22
+        || lesson.f.trim().is_empty()
+        || lesson.q.trim().is_empty()
+        || generic_learning_checkpoint_question(&lesson.q)
+        || lesson.a.trim().is_empty()
         || wrong_answer_count != 3
+        || wrong_feedback_count != 3
     {
         return Err(ApiError::InvalidAiResponse);
     }
+
+    Ok(())
+}
+
+fn generic_learning_checkpoint_question(question: &str) -> bool {
+    let lower = question.trim().to_ascii_lowercase();
+    let names_domain_term = [
+        "cell", "outpoint", "witness", "script", "channel", "invoice", "nonce", "ptlc", "joyid",
+        "xudt", "fiber", "receipt", "capacity", "lock", "type",
+    ]
+    .iter()
+    .any(|term| lower.contains(term));
+
+    lower.split_whitespace().count() < 9
+        || lower.contains("exact proof boundary for this lesson")
+        || (lower.contains("what is the proof boundary") && !names_domain_term)
+        || (lower.contains("what must be proven for this lesson") && !names_domain_term)
+}
+
+fn compact_ai_lesson_to_learning_lesson(
+    index: usize,
+    _background: &str,
+    focus: &str,
+    lesson: AiLearningLessonCompact,
+) -> Result<LearningLesson, ApiError> {
+    validate_ai_learning_lesson_compact(&lesson)?;
+
+    let title = lesson.t.trim().to_string();
+    let why_it_matters = lesson.w.trim().to_string();
+    let quest_bridge = lesson.j.trim().to_string();
+    let follow_up = lesson.f.trim().to_string();
+    let question = lesson.q.trim().to_string();
+    let correct_answer = lesson.a.trim().to_string();
 
     let concepts = infer_learning_concepts(focus, &lesson);
     let correct_index = checkpoint_correct_index(index, lesson.ci);
     let correct_option = LearningOption {
         label: correct_answer,
         feedback: format!(
-            "Correct. This matches the proof boundary for '{}'. Now name the denial test that would fail if the verifier was shallow.",
-            clamp_text(title.clone(), 80)
+            "Correct. {}",
+            checkpoint_explanation_for_lesson(&lesson, &concepts)
         ),
     };
-    let mut wrong_answers = learning_wrong_options(lesson.b.clone(), &lesson)?.into_iter();
+    let mut wrong_answers =
+        learning_wrong_options(lesson.b.clone(), lesson.bf.clone())?.into_iter();
     let options = (0..4)
         .map(|option_index| {
             if option_index == correct_index {
@@ -3922,68 +4108,25 @@ fn compact_ai_lesson_to_learning_lesson(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let explanation = expanded_learning_explanation(background, focus, &lesson, &concepts);
-    let why_it_matters = why_this_lesson_matters(background, focus, &lesson, &concepts);
-    let checkpoint_explanation = checkpoint_explanation_for_lesson(&lesson, &concepts);
     Ok(LearningLesson {
         id: format!("module-{}-lesson-1", index + 1),
         title,
         why_it_matters,
-        explanation,
+        explanation: expanded_learning_explanation(&lesson),
         concepts: concepts.clone(),
         checkpoint: LearningCheckpoint {
             question,
             options,
             correct_index,
-            explanation: checkpoint_explanation,
-            follow_up_question: follow_up_for_lesson(&lesson, &concepts),
+            explanation: checkpoint_explanation_for_lesson(&lesson, &concepts),
+            follow_up_question: follow_up,
         },
-        quest_bridge: quest_bridge_for_lesson(focus, &lesson, &concepts),
+        quest_bridge,
     })
 }
 
-fn expanded_learning_explanation(
-    background: &str,
-    focus: &str,
-    lesson: &AiLearningLessonCompact,
-    concepts: &[String],
-) -> String {
-    let title = non_empty_or(lesson.t.clone(), "AI-authored CKB/Fiber lesson");
-    let lesson_body = lesson.e.trim();
-    let code = lesson.s.trim();
-    let concept_list = if concepts.is_empty() {
-        focus.to_string()
-    } else {
-        concepts.join(", ")
-    };
-
-    format!(
-        "{title}\n\n{lesson_body}\n\nCode lens:\n{code}\n\nStudy routine for a {background}: turn the code lens into one invariant, then attack one trusted field before accepting the implementation. For this {focus} lesson, the active concepts are {concept_list}. A good learner answer should name what is trusted, where that trust comes from, and what denial test would prove the code is not just a happy path.\n\nPractice handoff: once the checkpoint is passed, VibeQuest should generate a quest from this lesson's exact proof boundary, not a generic challenge. The generated quest should include files, a denial-oriented test, a code explainer, and a boss question tied to the same invariant.",
-        title = title,
-        lesson_body = lesson_body,
-        focus = focus,
-        code = code,
-        background = background,
-        concept_list = concept_list,
-    )
-}
-
-fn why_this_lesson_matters(
-    background: &str,
-    focus: &str,
-    lesson: &AiLearningLessonCompact,
-    concepts: &[String],
-) -> String {
-    let concept_list = if concepts.is_empty() {
-        focus.to_string()
-    } else {
-        concepts.join(", ")
-    };
-    format!(
-        "For a {background}, this {focus} lesson matters because it turns {} into one concrete review habit: name the trusted field, mutate it, and prove the generated code rejects the attack around {}.",
-        non_empty_or(lesson.t.clone(), "this generated-code lesson"),
-        concept_list,
-    )
+fn expanded_learning_explanation(lesson: &AiLearningLessonCompact) -> String {
+    format!("{}\n\nCode lens:\n{}", lesson.e.trim(), lesson.s.trim())
 }
 
 fn checkpoint_explanation_for_lesson(
@@ -3996,7 +4139,7 @@ fn checkpoint_explanation_for_lesson(
         concepts.join(", ")
     };
     format!(
-        "The strongest answer is: {}. It should connect directly to {} and to a denial test that mutates the trusted field. If you cannot state that attack in your own words, the generated code is still a black box.",
+        "The answer must connect '{}' to {} and to a denial test that mutates the trusted field. If the learner cannot state that attack in their own words, the generated code is still a black box.",
         lesson.a.trim(),
         concept_list,
     )
@@ -4009,27 +4152,30 @@ fn checkpoint_correct_index(lesson_index: usize, model_index: usize) -> usize {
 
 fn learning_wrong_options(
     labels: Vec<String>,
-    lesson: &AiLearningLessonCompact,
+    feedbacks: Vec<String>,
 ) -> Result<Vec<LearningOption>, ApiError> {
-    let options = labels
+    let labels = labels
         .into_iter()
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty())
         .take(3)
-        .map(|label| LearningOption {
-            label,
-            feedback: format!(
-                "This misses the proof boundary in '{}'. Compare it with the code lens and ask what a denial test would mutate.",
-                clamp_text(non_empty_or(lesson.t.clone(), "this lesson"), 80)
-            ),
-        })
+        .collect::<Vec<_>>();
+    let feedbacks = feedbacks
+        .into_iter()
+        .map(|feedback| feedback.trim().to_string())
+        .filter(|feedback| !feedback.is_empty())
+        .take(3)
         .collect::<Vec<_>>();
 
-    if options.len() != 3 {
+    if labels.len() != 3 || feedbacks.len() != 3 {
         return Err(ApiError::InvalidAiResponse);
     }
 
-    Ok(options)
+    Ok(labels
+        .into_iter()
+        .zip(feedbacks)
+        .map(|(label, feedback)| LearningOption { label, feedback })
+        .collect())
 }
 
 fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec<String> {
@@ -4051,6 +4197,7 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         ("joyid", "JoyID proof"),
         ("nonce", "nonce"),
         ("invoice", "Fiber invoice"),
+        ("ptlc", "PTLC"),
         ("htlc", "HTLC"),
         ("channel", "channel state"),
         ("replay", "replay defense"),
@@ -4073,36 +4220,134 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
     concepts
 }
 
-fn follow_up_for_lesson(lesson: &AiLearningLessonCompact, concepts: &[String]) -> String {
-    let first_concept = concepts
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "trusted field".to_string());
+fn learning_module_title(request: &GenerateLearningModuleRequest) -> String {
     format!(
-        "In '{}', which {} value would you mutate first to prove the verifier rejects the wrong state?",
-        clamp_text(non_empty_or(lesson.t.clone(), "this lesson"), 80),
-        first_concept
+        "VibeQuest: {} Deep Dive",
+        clamp_text(learning_focus_label(request), 52)
     )
 }
 
-fn quest_bridge_for_lesson(
-    focus: &str,
-    lesson: &AiLearningLessonCompact,
-    concepts: &[String],
-) -> String {
-    let concept_list = if concepts.is_empty() {
-        "the lesson's trusted proof boundary".to_string()
+fn learning_focus_label(request: &GenerateLearningModuleRequest) -> String {
+    let interests = request
+        .interests
+        .iter()
+        .map(|interest| interest.trim())
+        .filter(|interest| !interest.is_empty())
+        .take(4)
+        .collect::<Vec<_>>();
+
+    if interests.is_empty() {
+        "CKB/Fiber".to_string()
     } else {
-        concepts.join(", ")
-    };
+        interests.join(" + ")
+    }
+}
+
+fn learning_background_label(request: &GenerateLearningModuleRequest) -> String {
+    let background = request.background.trim();
+    if background.is_empty() {
+        "learner".to_string()
+    } else {
+        background.to_string()
+    }
+}
+
+fn learning_module_profile(request: &GenerateLearningModuleRequest) -> String {
     format!(
-        "Generate a {focus} practice quest from '{}'. Include generated code, one denial test that mutates {}, an explainer for the code path, and a boss question that checks the same misunderstanding.",
-        clamp_text(non_empty_or(lesson.t.clone(), "this lesson"), 72),
-        concept_list
+        "A {} learning {} through live AI-authored deep modules, code snippets, checkpoints, tutor support, and practical quest handoffs.",
+        learning_background_label(request),
+        learning_focus_label(request)
     )
 }
 
-fn learning_module_prompt(request: &GenerateLearningModuleRequest) -> String {
+fn learning_module_outcome(request: &GenerateLearningModuleRequest) -> String {
+    format!(
+        "Explain {} trust boundaries, read generated verifier code, answer code-aware checkpoints, and turn passed lessons into quests.",
+        learning_focus_label(request)
+    )
+}
+
+fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> String {
+    format!(
+        "Generate a {} verifier quest with proof binding, denial tests, a boss question, and a reward-safe ship gate.",
+        learning_focus_label(request)
+    )
+}
+
+fn learning_lesson_role(path_id: Option<&str>, lesson_index: usize) -> &'static str {
+    let roles = match path_id.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "ckb-cells" => [
+            "state model and live-cell evidence",
+            "OutPoint lineage, inputs, outputs, and transaction scope",
+            "lock scripts, type scripts, witnesses, and local verifier trust",
+            "denial testing for copied cell data, stale witnesses, and fake frontend payloads",
+            "turning CKB cell understanding into a generated verifier quest",
+        ],
+        "fiber-payments" => [
+            "payment channel mental model and CKB-backed settlement assumptions",
+            "invoice, PTLC, route, and channel-state proof boundaries",
+            "paid-content receipt verification and replay-resistant access control",
+            "xUDT amount, balance transition, and payout integrity checks",
+            "turning Fiber payment understanding into a generated verifier quest",
+        ],
+        "security-audits" => [
+            "threat modeling CKB/Fiber flows before trusting generated code",
+            "replay, mismatch, stale state, and witness-substitution attacks",
+            "JoyID signer scope, domain binding, nonce freshness, and action intent",
+            "denial tests that mutate the exact proof boundary under review",
+            "turning audit findings into a generated fix-and-defend quest",
+        ],
+        _ => [
+            "core mental model for the selected CKB/Fiber topic",
+            "proof boundary and generated-code reading habit",
+            "wallet, payment, state, or verifier integration risk",
+            "attack case and denial test design",
+            "turning the lesson into a practical generated quest",
+        ],
+    };
+
+    roles[lesson_index.min(4)]
+}
+
+fn learning_speciality_directive(background: &str) -> &'static str {
+    let lower = background.to_ascii_lowercase();
+    if lower.contains("vibecoder") {
+        "The learner uses AI to generate code quickly. Teach them how to slow down at the proof boundary, read generated code, name trusted fields, and design denial tests before believing the AI output."
+    } else if lower.contains("backend") {
+        "The learner writes backend services. Emphasize verifier placement, database versus chain evidence, request tampering, authorization scope, replay prevention, and tests that run outside the frontend."
+    } else if lower.contains("frontend") {
+        "The learner builds interfaces. Explain what the UI may display versus what the backend or chain must verify, how wallet UX can mislead, and how to surface proof state without trusting client labels."
+    } else if lower.contains("security") || lower.contains("auditor") {
+        "The learner reviews systems for risk. Emphasize threat models, attacker-controlled fields, stale proofs, replay paths, denial tests, and how to prove generated code rejects the intended attack."
+    } else if lower.contains("product") || lower.contains("community") {
+        "The learner may not write every line of code. Explain value, risk, trust boundaries, user stories, and plain-language failure cases while still pointing to the technical evidence that matters."
+    } else {
+        "Teach through concrete CKB/Fiber examples, generated-code reading habits, proof boundaries, and denial tests that fit the learner's stated background."
+    }
+}
+
+fn learning_focus_directive(path_id: Option<&str>) -> &'static str {
+    match path_id.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "ckb-cells" => {
+            "Ground the lesson in CKB cells, capacity, cell data, OutPoint lineage, inputs and outputs, lock/type scripts, witnesses, transaction evidence, and local verifier boundaries."
+        }
+        "fiber-payments" => {
+            "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
+        }
+        "security-audits" => {
+            "Ground the lesson in replay defense, witness mismatch, stale Fiber state, JoyID signer scope, xUDT payout integrity, denial tests, and reward-safe ship gates."
+        }
+        _ => {
+            "Ground the lesson in the selected CKB/Fiber/JoyID interests and make the proof boundary clear enough to become a practical quest."
+        }
+    }
+}
+
+fn learning_lesson_prompt(
+    request: &GenerateLearningModuleRequest,
+    lesson_index: usize,
+    repair: bool,
+) -> String {
     let nonce = Uuid::new_v4();
     let interests = request
         .interests
@@ -4117,26 +4362,33 @@ fn learning_module_prompt(request: &GenerateLearningModuleRequest) -> String {
     } else {
         interests
     };
-    let focus_directive = match request.path_id.as_deref() {
-        Some(path_id) if path_id.eq_ignore_ascii_case("ckb-cells") => {
-            "Focus on CKB cell state, OutPoint lineage, lock/type scripts, witnesses, transaction evidence, local verifier trust boundaries, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
-        }
-        Some(path_id) if path_id.eq_ignore_ascii_case("fiber-payments") => {
-            "Focus on Fiber payment channels, invoices, HTLC preimages, channel state, paid-access receipts, CKB settlement assumptions, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
-        }
-        Some(path_id) if path_id.eq_ignore_ascii_case("security-audits") => {
-            "Focus on replay defense, witness mismatch, stale Fiber state, JoyID proof scope, xUDT payout integrity, denial tests, and lesson-to-quest handoff. Author fresh lesson titles, code lenses, checkpoint traps, and quest bridges for this learner."
-        }
-        _ => {
-            "Tailor the path to the learner's selected interests. Author fresh lesson titles, examples, code lenses, and checkpoint misunderstandings for this exact goal."
-        }
+    let background = request.background.trim();
+    let background = if background.is_empty() {
+        "learner"
+    } else {
+        background
+    };
+    let repair_directive = if repair {
+        "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be 335-365 words and must teach, not summarize."
+    } else {
+        ""
     };
 
     format!(
-        r#"Return minified JSON only. Keys t,l. l exactly 5 objects with keys t,e,s,q,a,b,ci. Topic: CKB/Fiber/JoyID learning for vibecoders. Interests: {interests}. Goal: {goal}. Background: {background}. Pace: {pace}. Focus directive: {focus_directive}. Seed: {nonce}. Each lesson must be AI-authored for this exact learner, code-aware, and different from the others. e must be a 22-36 word learner-specific concept seed with concrete CKB/Fiber/JoyID detail, one failure mode, and one denial-test idea. s one TypeScript or Rust code lens line. q a checkpoint about the lesson's generated-code trust boundary, written from that lesson's exact concept seed and code lens. a the correct answer. b exactly 3 plausible wrong answer labels that reveal different misunderstandings. ci integer 0-3; do not always use 0. No markdown."#,
+        r#"Return minified JSON only with keys exactly: t,e,s,w,j,f,q,a,b,bf,ci. No markdown or prose outside JSON.
+
+VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}. Learner goal: {goal}. Speciality: {background}. Pace: {pace}. Focus: {focus_directive}. Speciality lens: {speciality_directive}. {repair_directive}
+
+Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, JoyID docs https://docs.joyid.dev/ for passkey signer UX.
+
+e must be 335-365 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, and describe one denial-test idea. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+        module_number = lesson_index + 1,
+        module_role = learning_lesson_role(request.path_id.as_deref(), lesson_index),
         goal = request.learner_goal.trim(),
-        background = request.background.trim(),
+        background = background,
         pace = request.pace.trim(),
+        focus_directive = learning_focus_directive(request.path_id.as_deref()),
+        speciality_directive = learning_speciality_directive(background),
     )
 }
 
@@ -4330,11 +4582,11 @@ mod tests {
     use p256::ecdsa::{SigningKey, signature::Signer as _};
 
     fn ai_impl_fixture() -> String {
-        "export type Receipt={reader:string;contentId:string;runId:string;ckbCell:string;invoice:string;preimage:string;channelState:string};\nexport type Claim={reader:string;contentId:string;runId:string;ckbCell:string};\nexport function verifyGeneratedReceipt(receipt:Receipt|undefined,claim:Claim){\n  if(!receipt)return false;\n  const sameReader=receipt.reader===claim.reader;\n  const sameContent=receipt.contentId===claim.contentId;\n  const sameRun=receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('HTLC-proof-');\n  return sameReader&&sameContent&&sameRun&&sameCell&&fiberProof;\n}".to_string()
+        "export type Receipt={reader:string;contentId:string;runId:string;ckbCell:string;invoice:string;preimage:string;channelState:string};\nexport type Claim={reader:string;contentId:string;runId:string;ckbCell:string};\nexport function verifyGeneratedReceipt(receipt:Receipt|undefined,claim:Claim){\n  if(!receipt)return false;\n  const sameReader=receipt.reader===claim.reader;\n  const sameContent=receipt.contentId===claim.contentId;\n  const sameRun=receipt.runId===claim.runId;\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('PTLC-proof-');\n  return sameReader&&sameContent&&sameRun&&sameCell&&fiberProof;\n}".to_string()
     }
 
     fn ai_test_fixture() -> String {
-        "import {verifyGeneratedReceipt,type Receipt,type Claim} from '../src/quest';\nconst claim:Claim={reader:'alice',contentId:'lesson',runId:'vq-__RUN_SEED__',ckbCell:'cell:__RUN_SEED__'};\nconst receipt:Receipt={...claim,invoice:'fiber:invoice-__RUN_SEED__',preimage:'HTLC-proof-__RUN_SEED__',channelState:'open:cell:__RUN_SEED__'};\ntest('accepts Fiber receipt bound to reader content run and CKB cell',()=>expect(verifyGeneratedReceipt(receipt,claim)).toBe(true));\ntest('rejects replay with wrong run id',()=>expect(verifyGeneratedReceipt({...receipt,runId:'vq-old'},claim)).toBe(false));\ntest('blocks mismatched CKB cell state',()=>expect(verifyGeneratedReceipt({...receipt,ckbCell:'cell:attacker'},claim)).toBe(false));".to_string()
+        "import {verifyGeneratedReceipt,type Receipt,type Claim} from '../src/quest';\nconst claim:Claim={reader:'alice',contentId:'lesson',runId:'vq-__RUN_SEED__',ckbCell:'cell:__RUN_SEED__'};\nconst receipt:Receipt={...claim,invoice:'fiber:invoice-__RUN_SEED__',preimage:'PTLC-proof-__RUN_SEED__',channelState:'open:cell:__RUN_SEED__'};\ntest('accepts Fiber receipt bound to reader content run and CKB cell',()=>expect(verifyGeneratedReceipt(receipt,claim)).toBe(true));\ntest('rejects replay with wrong run id',()=>expect(verifyGeneratedReceipt({...receipt,runId:'vq-old'},claim)).toBe(false));\ntest('blocks mismatched CKB cell state',()=>expect(verifyGeneratedReceipt({...receipt,ckbCell:'cell:attacker'},claim)).toBe(false));".to_string()
     }
 
     fn ai_seed_json(title: &str, domain: &str, invariant: &str, attack: &str) -> String {
@@ -4587,16 +4839,25 @@ Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXu
             background: "Backend dev".to_string(),
             pace: "Deep dive".to_string(),
         };
+        let lesson_body = "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace how the wallet address, challenge nonce, domain, action name, CKB cell reference, and Fiber channel request are assembled before signature verification. The important detail is that JoyID makes the signing experience feel simple, but the verifier still has to decide what the user actually approved. A passkey signature proves control of a signer; it does not automatically prove that the same signer approved this run, this route, this invoice, or this generated code path. CKB adds another boundary because cells, scripts, witnesses, and transaction evidence describe state in a way a frontend payload cannot replace. Fiber adds a payment boundary because channel state and invoice proof must be scoped to the content, amount, and settlement expectation. The failure mode is subtle: a vibe-coded route may check that a signature exists while letting the same signed text approve another payout, channel action, or generated quest run. A stronger verifier binds the challenge to the current run, refuses stale nonces, records which proof was consumed, and checks that the CKB or Fiber evidence being trusted is the evidence named in the signed message. The denial test should copy a valid signature into a request with a different run id, CKB cell, Fiber invoice, or action name and prove the backend rejects it before any badge or reward state changes. That test teaches the learner to read generated code by asking what exact proof boundary the code defends, not whether the UI looks authenticated. The practical review habit is to read the generated function from the accepting return statement backward. Every value that makes the function return true should come from either the signed JoyID message, the CKB transaction evidence, or the Fiber payment state. If a value appears only in request JSON, the learner should treat it as attacker-controlled until a denial test proves otherwise.";
         let compact = AiLearningModuleCompact {
             t: "CKB Fiber JoyID from vibecoded code".to_string(),
             l: (0..5)
                 .map(|index| AiLearningLessonCompact {
                     t: format!("Module {index} Verify CKB/Fiber proof"),
-                    e: "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace how the wallet address, challenge nonce, domain, action name, CKB cell reference, and Fiber channel request are assembled before signature verification. The failure mode is subtle: a vibe-coded route may check that a signature exists while letting the same signed text approve another payout, channel action, or generated quest run. A stronger verifier binds the challenge to the current run, refuses stale nonces, and records which proof was consumed. The denial test should copy a valid signature into a request with a different run id or Fiber invoice and prove the backend rejects it before any badge or reward state changes.".to_string(),
+                    e: lesson_body.to_string(),
                     s: "const ok = await verifyJoyIDSignature({ message, signature, address });".to_string(),
+                    w: "For a backend developer, this matters because generated wallet code often confuses signer presence with authorization. The lesson forces the learner to connect JoyID proof, CKB state evidence, Fiber payment context, and denial tests before trusting a generated verifier.".to_string(),
+                    j: "Generate a verifier quest that binds JoyID challenge fields to CKB cell evidence and Fiber invoice context, then rejects replayed run ids or mismatched payment state.".to_string(),
+                    f: "Which signed field would you mutate first to prove the authorization cannot be replayed?".to_string(),
                     q: "What must the backend verify before trusting a JoyID-authorized Fiber request?".to_string(),
-                    a: "JoyID signature over the exact challenge payload".to_string(),
+                    a: "JoyID signature over the exact challenge payload and action context".to_string(),
                     b: vec!["CSS theme".to_string(), "Gas price chart".to_string(), "Frontend route".to_string()],
+                    bf: vec![
+                        "Visual styling does not prove signer intent, CKB state, or Fiber payment context.".to_string(),
+                        "Gas information is not the authorization boundary for a generated verifier.".to_string(),
+                        "A frontend route can be bypassed; backend proof binding must enforce the action.".to_string(),
+                    ],
                     ci: index % 4,
                 })
                 .collect(),
@@ -4610,7 +4871,7 @@ Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXu
                 .explanation
                 .contains("JoyID-signed payload")
         );
-        assert!(module.lessons[0].explanation.split_whitespace().count() >= 150);
+        assert!(module.lessons[0].explanation.split_whitespace().count() >= 300);
         assert!(module.lessons[0].explanation.contains("Code lens:"));
         assert!(
             module.lessons[0]
@@ -4618,7 +4879,12 @@ Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXu
                 .contains("verifyJoyIDSignature")
         );
         assert_eq!(module.lessons[0].checkpoint.options.len(), 4);
-        assert!(module.lessons[0].why_it_matters.contains("Backend dev"));
+        assert!(
+            module.lessons[0]
+                .why_it_matters
+                .to_lowercase()
+                .contains("backend")
+        );
     }
 
     #[test]
