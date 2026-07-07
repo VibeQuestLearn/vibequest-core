@@ -24,7 +24,7 @@ cargo run
 | `CORS_ORIGINS` | No | `http://localhost:3000` | Comma-separated frontend origins. Use `*` only for throwaway demos. |
 | `OPENAI_API_KEY` | Yes | empty | Enables OpenAI quest generation. |
 | `OPENAI_MODEL` | No | `gpt-5.5` | OpenAI model for quest generation. |
-| `OPENAI_BASE_URL` | No | `https://share-ai.ckbdev.com` | OpenAI-compatible Responses API gateway. |
+| `OPENAI_BASE_URL` | No | `  ` | OpenAI-compatible Responses API gateway. |
 | `OPENAI_REASONING_EFFORT` | No | `xhigh` | Reasoning effort sent as `reasoning.effort`. |
 | `OPENAI_DISABLE_RESPONSE_STORAGE` | No | `true` | Sends `store: false` to avoid retaining generated responses. |
 | `OPENAI_TIMEOUT_SECONDS` | No | `180` | Request timeout for slower high-reasoning OpenAI calls. |
