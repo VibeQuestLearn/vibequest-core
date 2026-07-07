@@ -2445,17 +2445,17 @@ async fn generate_quest(
         .learning_context
         .clone()
         .map(compact_learning_quest_link);
-    let (quest, source, warning) = match state.openai.generate_quest(&request).await {
-        Ok(quest) => (compact_quest_blueprint(quest)?, QuestSource::OpenAi, None),
-        Err(
-            error @ (ApiError::OpenAiTransport(_)
-            | ApiError::OpenAiStatus { .. }
-            | ApiError::InvalidAiResponse),
-        ) if learning_context.is_some() => {
-            warn!(%error, "AI lesson-to-quest generation failed; refusing static lesson quest fallback");
-            return Err(error);
+    let (quest, source, warning) = if learning_context.is_some() {
+        (
+            build_lesson_compiled_quest(&request, run_id)?,
+            QuestSource::ReviewedPath,
+            None,
+        )
+    } else {
+        match state.openai.generate_quest(&request).await {
+            Ok(quest) => (compact_quest_blueprint(quest)?, QuestSource::OpenAi, None),
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
 
     let mut response = GenerateQuestResponse {
@@ -3230,6 +3230,296 @@ fn build_quest_from_ai_seed(
             },
         ],
     })
+}
+
+fn build_lesson_compiled_quest(
+    request: &GenerateQuestRequest,
+    run_id: Uuid,
+) -> Result<QuestBlueprint, ApiError> {
+    let context = request
+        .learning_context
+        .as_ref()
+        .ok_or(ApiError::InvalidAiResponse)?;
+    let domain_context = format!(
+        "{} {} {} {} {} {}",
+        context.module_title,
+        context.lesson_title,
+        context.concepts.join(" "),
+        context.checkpoint_question,
+        context.correct_answer,
+        context.quest_bridge,
+    );
+    let domain = parse_quest_domain(&domain_context, &request.build_prompt);
+    let invariant = lesson_quest_invariant(context, domain);
+    let attack_field = lesson_quest_attack_field(context, domain);
+    let seed = AiQuestSeed {
+        t: lesson_quest_title(context, domain),
+        d: domain_seed_value(domain).to_string(),
+        i: invariant.clone(),
+        a: attack_field.clone(),
+        c: lesson_quest_implementation(domain, &invariant),
+        p: lesson_quest_test(domain, &attack_field),
+    };
+
+    build_quest_from_ai_seed(request, seed, run_id)
+}
+
+fn lesson_quest_title(context: &LearningQuestLink, domain: QuestDomain) -> String {
+    let base = context.lesson_title.trim();
+    let title = if base.is_empty() {
+        format!("{} Practice Quest", domain_label(domain))
+    } else {
+        format!("{} Practice Quest", base)
+    };
+    clamp_text(title, 80)
+}
+
+fn lesson_quest_invariant(context: &LearningQuestLink, domain: QuestDomain) -> String {
+    let answer = context.correct_answer.trim();
+    if answer.chars().count() >= 45 {
+        return clamp_text(answer.to_string(), 220);
+    }
+
+    let summary = context.lesson_summary.trim();
+    if summary.chars().count() >= 45 {
+        return clamp_text(summary.to_string(), 220);
+    }
+
+    invariant_for_domain(domain).to_string()
+}
+
+fn lesson_quest_attack_field(context: &LearningQuestLink, domain: QuestDomain) -> String {
+    let haystack = format!(
+        "{} {} {} {}",
+        context.quest_bridge,
+        context.misunderstanding,
+        context.checkpoint_question,
+        context.correct_answer,
+    )
+    .to_lowercase();
+
+    if domain == QuestDomain::CkbCell {
+        if haystack.contains("witness") {
+            return "witness".to_string();
+        }
+        if haystack.contains("nonce") || haystack.contains("challenge") {
+            return "nonce".to_string();
+        }
+        if haystack.contains("cell")
+            || haystack.contains("outpoint")
+            || haystack.contains("out point")
+        {
+            return "inputOutPoint".to_string();
+        }
+    }
+
+    if haystack.contains("amount") || haystack.contains("xudt") || haystack.contains("split") {
+        return "amountXudt".to_string();
+    }
+    if haystack.contains("witness") || haystack.contains("script") || haystack.contains("cell") {
+        return "ckbCell".to_string();
+    }
+    if haystack.contains("event") || haystack.contains("settlement") || haystack.contains("idempot")
+    {
+        return "eventId".to_string();
+    }
+    if haystack.contains("invoice") {
+        return "invoice".to_string();
+    }
+
+    attack_field_for_domain(domain).to_string()
+}
+
+fn domain_seed_value(domain: QuestDomain) -> &'static str {
+    match domain {
+        QuestDomain::CkbCell => "ckb-cell",
+        QuestDomain::Receipt => "receipt",
+        QuestDomain::Witness => "witness",
+        QuestDomain::Split => "split",
+        QuestDomain::Settlement => "settlement",
+    }
+}
+
+fn lesson_quest_implementation(domain: QuestDomain, invariant: &str) -> String {
+    if domain == QuestDomain::CkbCell {
+        return lesson_ckb_cell_implementation(invariant);
+    }
+
+    lesson_general_implementation(function_for_domain(domain), invariant)
+}
+
+fn lesson_ckb_cell_implementation(invariant: &str) -> String {
+    let invariant_literal = ts_string_literal(invariant);
+    format!(
+        r#"export type CkbCellProof = {{
+  runId: string;
+  joyIdChallenge: string;
+  nonce: string;
+  inputOutPoint: string;
+  expectedOutPoint: string;
+  outputLockScriptHash: string;
+  expectedLockScriptHash: string;
+  outputTypeScriptHash: string;
+  expectedTypeScriptHash: string;
+  cellDataHash: string;
+  expectedCellDataHash: string;
+  witness: string;
+  invoice: string;
+  channelState: string;
+}};
+
+export function verifyCkbCellProof(proof?: CkbCellProof): boolean {{
+  if (!proof) return false;
+  const challengeScoped = proof.joyIdChallenge.includes(proof.runId) && proof.joyIdChallenge.includes(proof.nonce);
+  const nonceFresh = proof.nonce.length >= 8 && proof.witness.includes(proof.nonce);
+  const spendsExpectedCell = proof.inputOutPoint === proof.expectedOutPoint;
+  const outputLockMatches = proof.outputLockScriptHash === proof.expectedLockScriptHash;
+  const outputTypeMatches = proof.outputTypeScriptHash === proof.expectedTypeScriptHash;
+  const dataMatches = proof.cellDataHash === proof.expectedCellDataHash;
+  const witnessBindsCell = proof.witness.includes(proof.inputOutPoint) && proof.witness.includes(proof.outputLockScriptHash);
+  const witnessBindsJoyId = proof.witness.includes(proof.joyIdChallenge);
+  const fiberContextScoped = proof.invoice.startsWith("fiber:") && proof.channelState.includes(proof.inputOutPoint);
+  return challengeScoped && nonceFresh && spendsExpectedCell && outputLockMatches && outputTypeMatches && dataMatches && witnessBindsCell && witnessBindsJoyId && fiberContextScoped;
+}}
+
+export const ACTIVE_RUN_ID = "vq-__RUN_SEED__";
+export const LESSON_INVARIANT = {invariant_literal};
+"#,
+    )
+}
+
+fn lesson_general_implementation(function_name: &str, invariant: &str) -> String {
+    let invariant_literal = ts_string_literal(invariant);
+    format!(
+        r#"export type LessonQuestProof = {{
+  runId: string;
+  reader: string;
+  contentId: string;
+  ckbCell: string;
+  witness: string;
+  invoice: string;
+  preimage: string;
+  channelState: string;
+  amountXudt: string;
+  expectedAmountXudt: string;
+  eventId: string;
+  processedEventIds: string[];
+}};
+
+export function {function_name}(proof?: LessonQuestProof): boolean {{
+  if (!proof) return false;
+  const actorScoped = proof.reader.length > 2 && proof.contentId.length > 2 && proof.runId.startsWith("vq-");
+  const ckbWitnessBound = proof.ckbCell.startsWith("cell:") && proof.witness.includes(proof.ckbCell) && proof.witness.includes(proof.runId);
+  const fiberReceiptBound = proof.invoice.startsWith("fiber:") && proof.preimage.startsWith("PTLC-proof-") && proof.channelState.includes(proof.ckbCell);
+  const payoutMatches = proof.amountXudt === proof.expectedAmountXudt && BigInt(proof.amountXudt) > 0n;
+  const settlementFresh = proof.eventId.length >= 8 && !proof.processedEventIds.includes(proof.eventId);
+  return actorScoped && ckbWitnessBound && fiberReceiptBound && payoutMatches && settlementFresh;
+}}
+
+export const ACTIVE_RUN_ID = "vq-__RUN_SEED__";
+export const LESSON_INVARIANT = {invariant_literal};
+"#,
+    )
+}
+
+fn lesson_quest_test(domain: QuestDomain, attack_field: &str) -> String {
+    if domain == QuestDomain::CkbCell {
+        return lesson_ckb_cell_test(attack_field);
+    }
+
+    lesson_general_test(function_for_domain(domain), attack_field)
+}
+
+fn lesson_ckb_cell_test(attack_field: &str) -> String {
+    let mutation = match attack_field {
+        "witness" => "witness: 'joyid:vq-__RUN_SEED__:missing-cell'",
+        "nonce" => {
+            "nonce: 'stale', witness: validProof.witness.replace('nonce-__RUN_SEED__', 'stale')"
+        }
+        _ => "inputOutPoint: '0xattacker:1'",
+    };
+
+    format!(
+        r#"import {{ verifyCkbCellProof, type CkbCellProof }} from '../src/cellVerifier';
+
+const validProof: CkbCellProof = {{
+  runId: 'vq-__RUN_SEED__',
+  joyIdChallenge: 'joyid:vq-__RUN_SEED__:nonce-__RUN_SEED__',
+  nonce: 'nonce-__RUN_SEED__',
+  inputOutPoint: '0xcell__RUN_SEED__:0',
+  expectedOutPoint: '0xcell__RUN_SEED__:0',
+  outputLockScriptHash: 'lock:joyid:__RUN_SEED__',
+  expectedLockScriptHash: 'lock:joyid:__RUN_SEED__',
+  outputTypeScriptHash: 'type:xudt:__RUN_SEED__',
+  expectedTypeScriptHash: 'type:xudt:__RUN_SEED__',
+  cellDataHash: 'data:__RUN_SEED__',
+  expectedCellDataHash: 'data:__RUN_SEED__',
+  witness: 'joyid:vq-__RUN_SEED__:nonce-__RUN_SEED__:0xcell__RUN_SEED__:0:lock:joyid:__RUN_SEED__',
+  invoice: 'fiber:invoice:__RUN_SEED__',
+  channelState: 'open:0xcell__RUN_SEED__:0',
+}};
+
+test('accepts CKB cell proof bound to JoyID challenge, scripts, witness, and Fiber invoice', () => {{
+  expect(verifyCkbCellProof(validProof)).toBe(true);
+}});
+
+test('rejects replay when the trusted {attack_field} is mutated', () => {{
+  expect(verifyCkbCellProof({{ ...validProof, {mutation} }})).toBe(false);
+}});
+
+test('blocks mismatch between consumed cell and Fiber channel state', () => {{
+  expect(verifyCkbCellProof({{ ...validProof, channelState: 'open:0xother:0' }})).toBe(false);
+}});
+"#,
+    )
+}
+
+fn lesson_general_test(function_name: &str, attack_field: &str) -> String {
+    let mutation = match attack_field {
+        "amountXudt" => "amountXudt: '999'",
+        "ckbCell" => {
+            "ckbCell: 'cell:attacker', witness: validProof.witness.replace('cell:__RUN_SEED__', 'cell:attacker')"
+        }
+        "eventId" => "eventId: 'event-replayed', processedEventIds: ['event-replayed']",
+        "invoice" => "invoice: 'fiber:invoice:attacker'",
+        _ => "runId: 'vq-replayed'",
+    };
+
+    format!(
+        r#"import {{ {function_name}, type LessonQuestProof }} from '../src/quest';
+
+const validProof: LessonQuestProof = {{
+  runId: 'vq-__RUN_SEED__',
+  reader: 'learner-__RUN_SEED__',
+  contentId: 'lesson-quest-__RUN_SEED__',
+  ckbCell: 'cell:__RUN_SEED__',
+  witness: 'witness:vq-__RUN_SEED__:cell:__RUN_SEED__',
+  invoice: 'fiber:invoice:__RUN_SEED__',
+  preimage: 'PTLC-proof-__RUN_SEED__',
+  channelState: 'open:cell:__RUN_SEED__',
+  amountXudt: '1000',
+  expectedAmountXudt: '1000',
+  eventId: 'event-__RUN_SEED__',
+  processedEventIds: [],
+}};
+
+test('accepts the lesson proof only when CKB witness and Fiber receipt evidence are bound', () => {{
+  expect({function_name}(validProof)).toBe(true);
+}});
+
+test('rejects replay or mismatch when {attack_field} is mutated', () => {{
+  expect({function_name}({{ ...validProof, {mutation} }})).toBe(false);
+}});
+
+test('blocks unpaid or invalid payment proof without a PTLC preimage', () => {{
+  expect({function_name}({{ ...validProof, preimage: 'missing-proof' }})).toBe(false);
+}});
+"#,
+    )
+}
+
+fn ts_string_literal(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn ai_generated_quest_file(
@@ -4802,6 +5092,128 @@ Done.", ai_seed_json("Split Lab", "split", "xUDT split matches claim", "amountXu
         assert!(workspace.contains("test/cellverifier.test.ts"));
         assert!(workspace.contains("verifygeneratedreceipt"));
         assert!(workspace.contains("rejects replay"));
+    }
+
+    #[test]
+    fn lesson_context_compiles_quest_without_openai_roundtrip() {
+        let request = GenerateQuestRequest {
+            build_prompt: "Build a TypeScript verifier artifact that checks input OutPoint, output scripts, witness, and nonce".to_string(),
+            skill_track: Some("CKB Foundations".to_string()),
+            difficulty: Some(Difficulty::Builder),
+            wallet: joyid_wallet_fixture(),
+            learning_context: Some(LearningQuestLink {
+                module_id: "ckb-cells".to_string(),
+                lesson_id: "ckb-cells-lesson-3".to_string(),
+                module_title: "VibeQuest: CKB Cell Model + CKB Foundations Deep Dive".to_string(),
+                lesson_title: "Verifier Quest: Cell Evidence at the Backend Boundary".to_string(),
+                checkpoint_question: "What exact proof boundary should the backend enforce for a request claiming ownership of a CKB cell?".to_string(),
+                quest_bridge: "Build a TypeScript verifier artifact that checks input OutPoint, output lock/type script, witness, nonce, and rejects a swapped consumed cell.".to_string(),
+                concepts: vec![
+                    "CKB cell".to_string(),
+                    "OutPoint".to_string(),
+                    "lock script".to_string(),
+                    "type script".to_string(),
+                    "witness".to_string(),
+                ],
+                correct_answer: "It should verify submitted transaction evidence: the expected input cell OutPoint, resolved lock/type script fields, output capacity or xUDT split data, witness signature bound to the JoyID challenge, and a fresh nonce before mutating server state.".to_string(),
+                misunderstanding: "A database row can guide lookup, but it is not chain evidence and does not prove the specific cell or transaction fields.".to_string(),
+                lesson_summary: "The learner studied why backend CKB verifiers must bind request intent to transaction inputs, outputs, scripts, witnesses, and nonces.".to_string(),
+            }),
+        };
+
+        let quest = build_lesson_compiled_quest(&request, Uuid::new_v4()).unwrap();
+        let workspace = quest
+            .workbench_files
+            .iter()
+            .map(|file| {
+                format!(
+                    "{}
+{}",
+                    file.path, file.content
+                )
+                .to_lowercase()
+            })
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        assert!(workspace.contains("src/cellverifier.ts"));
+        assert!(workspace.contains("verifyckbcellproof"));
+        assert!(workspace.contains("inputoutpoint"));
+        assert!(workspace.contains("rejects replay"));
+        assert!(
+            quest.boss_fight.to_lowercase().contains("outpoint")
+                || quest.boss_fight.to_lowercase().contains("nonce")
+        );
+    }
+
+    #[test]
+    fn proof_security_lesson_compiles_quest_without_openai_timeout() {
+        let request = GenerateQuestRequest {
+            build_prompt: "Practice artifact: a fix-and-defend audit patch that binds UI fields to verified proof fields. Denial test: mutate witness, OutPoint, JoyID challenge, invoice nonce, or xUDT split and require rejection.".to_string(),
+            skill_track: Some("Fiber Builder".to_string()),
+            difficulty: Some(Difficulty::Builder),
+            wallet: joyid_wallet_fixture(),
+            learning_context: Some(LearningQuestLink {
+                module_id: "security-audits".to_string(),
+                lesson_id: "security-audits-lesson-5".to_string(),
+                module_title: "VibeQuest: Proof Security + Security Audits + CKB/Fiber Proof Security Deep Dive".to_string(),
+                lesson_title: "Fix-and-Defend Quest: Replay, Witness, Fiber State, and Payout Proofs".to_string(),
+                checkpoint_question: "For a Fiber xUDT payout settlement using JoyID, which fields form the proof boundary that must match before accepting the transaction?".to_string(),
+                quest_bridge: "Practice artifact: a fix-and-defend audit patch that binds UI fields to verified proof fields. Denial test: mutate witness, OutPoint, JoyID challenge, invoice nonce, or xUDT split and require rejection.".to_string(),
+                concepts: vec![
+                    "CKB cell".to_string(),
+                    "OutPoint".to_string(),
+                    "script".to_string(),
+                    "lock script".to_string(),
+                    "type script".to_string(),
+                ],
+                correct_answer: "The spent cell OutPoint, lock/type script rules, witness authorization, JoyID challenge/signature scope, current channel state or nonce, invoice/PTLC condition, and xUDT split amounts must all bind to the same settlement intent.".to_string(),
+                misunderstanding: "Client state is only presentation; it does not prove the chain cell, witness, script, or signer scope match. Invoice text and username labels can be replayed or misleading unless bound to nonce, challenge, PTLC, and scripts.".to_string(),
+                lesson_summary: "The learner practiced auditing replay, mismatched witnesses, stale Fiber state, and payout over-claiming by binding UI fields to verified proof fields.".to_string(),
+            }),
+        };
+
+        let quest = build_lesson_compiled_quest(&request, Uuid::new_v4()).unwrap();
+        let workspace = quest
+            .workbench_files
+            .iter()
+            .map(|file| {
+                format!(
+                    "{}
+{}",
+                    file.path, file.content
+                )
+                .to_lowercase()
+            })
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        assert!(
+            workspace.contains("verifyckbcellproof")
+                || workspace.contains("verifypayoutsplitreceipt")
+        );
+        assert!(workspace.contains("joyid"));
+        assert!(workspace.contains("witness"));
+        assert!(workspace.contains("fiber"));
+        assert!(
+            workspace.contains("rejects replay")
+                || workspace.contains("rejects replay or mismatch")
+        );
+        assert!(
+            quest
+                .challenge_brief
+                .as_ref()
+                .unwrap()
+                .correct_answer
+                .to_lowercase()
+                .contains("witness")
+        );
     }
 
     #[test]
