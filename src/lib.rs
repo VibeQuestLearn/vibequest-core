@@ -3111,7 +3111,7 @@ fn decode_base64_url(value: &str) -> Option<Vec<u8>> {
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let trimmed = value.trim().trim_start_matches("0x");
-    if trimmed.len() % 2 != 0
+    if !trimmed.len().is_multiple_of(2)
         || !trimmed
             .chars()
             .all(|character| character.is_ascii_hexdigit())
