@@ -2,6 +2,10 @@
 
 Rust backend for VibeQuest. It owns AI quest generation, wallet proof verification, game progression, and CKB/Fiber readiness gates.
 
+## Demo
+
+Watch the product walkthrough: [demo.webm](https://github.com/buidlLabs3/vibequest-web/blob/main/demo.webm).
+
 ## Run
 
 ```bash
