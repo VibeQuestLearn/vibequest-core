@@ -150,6 +150,11 @@ struct GenerateQuestRequest {
     learning_context: Option<LearningQuestLink>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BindWalletRequest {
+    wallet: WalletProof,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct LearningQuestLink {
     module_id: String,
@@ -1098,6 +1103,26 @@ impl MongoStore {
         Ok(())
     }
 
+    async fn bind_wallet_user(&self, wallet: WalletProof) -> Result<UserProfileResponse, ApiError> {
+        validate_wallet_proof(&wallet)?;
+        let binding = wallet_binding_from_proof(&wallet);
+        let address = binding.address.clone();
+        self.upsert_user(&binding).await?;
+
+        let user = self
+            .users()
+            .await?
+            .find_one(doc! { "_id": &address })
+            .await?
+            .ok_or_else(|| {
+                ApiError::Database(
+                    "MongoDB user profile was not found after wallet bind".to_string(),
+                )
+            })?;
+
+        Ok(user.into())
+    }
+
     async fn user_history(&self, address: &str) -> Result<UserQuestHistoryResponse, ApiError> {
         let address = address.trim();
         if address.is_empty() {
@@ -1778,6 +1803,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/season", get(season))
+        .route("/users/bind", post(bind_wallet_user))
         .route("/users/{address}/quests", get(list_user_quests))
         .route(
             "/users/{address}/learning",
@@ -2674,6 +2700,13 @@ async fn api_save_learning_tutor_exchange(
         .await?;
 
     Ok(Json(SavedTutorExchangeResponse { answer, session }))
+}
+
+async fn bind_wallet_user(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BindWalletRequest>,
+) -> Result<Json<UserProfileResponse>, ApiError> {
+    Ok(Json(state.store.bind_wallet_user(request.wallet).await?))
 }
 
 async fn list_user_quests(
