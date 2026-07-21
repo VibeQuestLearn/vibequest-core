@@ -2,15 +2,23 @@ name: Core CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, zcashlearn]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -29,6 +37,11 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: 1.91.0
 
       - name: Build
         run: cargo build --release
