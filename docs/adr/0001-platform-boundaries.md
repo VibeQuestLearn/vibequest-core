@@ -14,6 +14,9 @@ The inherited application couples learner identity, persistence, progression, re
 - Google OAuth authenticates the learning account.
 - The server establishes authorization; browser identity headers and completion booleans are untrusted.
 - AI may explain and personalize but may not define authoritative tests or award completion.
+- Reviewed curriculum and scenario manifests are Core-owned, versioned artifacts.
+- Public lesson projections exclude answer keys, hidden cases, defect metadata, and solution code.
+- Track content may be previewed while execution remains disabled pending an isolated runner.
 - No seed phrase, spending key, wallet custody, or mainnet spending enters the product.
 
 ## Consequences

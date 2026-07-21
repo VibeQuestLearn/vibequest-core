@@ -1,5 +1,5 @@
 {
-  "manifest_version": "zcash-sources-2026-07-21.1",
+  "manifest_version": "zcash-sources-2026-07-21.2",
   "retrieved_at": "2026-07-21",
   "supported_scope": "ZIP-316 Revision 0 Unified Address inspection and ZIP-321 ZEC payment request validation; no transaction construction, synchronization, or custody",
   "sources": [
@@ -56,6 +56,42 @@
       "revision": "d47691c6b620e9c1fa3574a5a63deb4da544da2e",
       "license": "MIT OR Apache-2.0",
       "notes": "Derived from the official zcash-test-vectors unified_address generator."
+    },
+    {
+      "source_id": "zip-0032",
+      "title": "ZIP 32: Shielded Hierarchical Deterministic Wallets",
+      "version": "Final",
+      "url": "https://zips.z.cash/zip-0032",
+      "revision": "canonical specification retrieved 2026-07-21",
+      "license": "MIT",
+      "notes": "Authoritative separation of viewing and spending authority for Sapling and Orchard wallet key hierarchies."
+    },
+    {
+      "source_id": "zip-0203",
+      "title": "ZIP 203: Transaction Expiry",
+      "version": "Final",
+      "url": "https://zips.z.cash/zip-0203",
+      "revision": "canonical specification retrieved 2026-07-21",
+      "license": "MIT",
+      "notes": "Defines expiry height and explicitly warns services not to rely on zero-confirmation transactions."
+    },
+    {
+      "source_id": "zcash-protocol-2026.7",
+      "title": "Zcash Protocol Specification",
+      "version": "v2026.7.0 release line (NU6.2)",
+      "url": "https://zips.z.cash/protocol/protocol.pdf",
+      "revision": "canonical generated specification retrieved 2026-07-21",
+      "license": "MIT",
+      "notes": "Official protocol concepts for networks, viewing authority, memo fields, transactions, and blockchain state. The URL is a moving canonical build, so the retrieval date is part of this manifest entry."
+    },
+    {
+      "source_id": "zcash-privacy-guidance",
+      "title": "How to use Zcash: private and transparent transactions",
+      "version": "official guidance retrieved 2026-07-21",
+      "url": "https://z.cash/learn/how-to-use-zcash/",
+      "revision": "official web guidance retrieved 2026-07-21",
+      "license": "Copyright Electric Coin Company; cited by URL",
+      "notes": "Official user-facing guidance that shielded data can remain private while transparent address activity is public. Application-level logging and linkage controls are VibeQuestLearn policy."
     }
   ]
 }

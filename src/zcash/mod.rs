@@ -79,7 +79,7 @@ mod tests {
     fn source_manifest_pins_one_cohesive_official_revision() {
         let manifest = source_manifest();
         assert_eq!(manifest.manifest_version, SOURCE_MANIFEST_VERSION);
-        assert_eq!(manifest.sources.len(), 6);
+        assert_eq!(manifest.sources.len(), 10);
         let ids = manifest
             .sources
             .iter()

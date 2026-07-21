@@ -1,0 +1,21 @@
+{
+  "tutor_contract_version": "zcash-reviewed-tutor-1.0.0",
+  "curriculum_version": "zcash-shielded-payments-1.0.0",
+  "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "source_manifest_version": "zcash-sources-2026-07-21.2",
+  "allowed_modes": [
+    "explanation",
+    "hint",
+    "remediation"
+  ],
+  "max_prompt_chars": 1200,
+  "max_test_output_chars": 6000,
+  "max_answer_chars": 1600,
+  "forbidden_generic_phrases": [
+    "as an ai language model",
+    "here is a general overview",
+    "consult the documentation",
+    "it depends on your implementation",
+    "cryptocurrency can be complex"
+  ]
+}

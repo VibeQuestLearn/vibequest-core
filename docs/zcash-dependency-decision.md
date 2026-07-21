@@ -2,7 +2,7 @@
 
 Date: 2026-07-21
 Decision: accepted for verifier `1.0.0`
-Source manifest: `zcash-sources-2026-07-21.1`
+Source manifest: `zcash-sources-2026-07-21.2`
 
 ## Selected Stable Set
 

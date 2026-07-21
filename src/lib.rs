@@ -5,6 +5,7 @@
 )]
 
 pub mod auth;
+pub mod curriculum;
 
 pub mod platform;
 pub mod zcash;
@@ -1888,6 +1889,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v3/catalog/{ecosystem_id}/tracks/{track_id}",
             get(v3_track),
         )
+        .route(
+            "/v3/catalog/{ecosystem_id}/tracks/{track_id}/curriculum",
+            get(v3_curriculum),
+        )
         .merge(protected)
         .layer(cors_layer(&state.config))
         .layer(TraceLayer::new_for_http())
@@ -2574,6 +2579,40 @@ async fn v3_track(
         .resolve_track(&ecosystem_id, &track_id)
         .map(Json)
         .map_err(registry_error_response)
+}
+
+async fn v3_curriculum(
+    Path((ecosystem_id, track_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<curriculum::PublicCurriculum>, (StatusCode, Json<RegistryErrorResponse>)> {
+    let track = state
+        .registry
+        .registered_track(&ecosystem_id, &track_id)
+        .map_err(registry_error_response)?;
+    let curriculum = curriculum::public_curriculum().map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RegistryErrorResponse {
+                code: "invalid-curriculum",
+                error: error.to_string(),
+            }),
+        )
+    })?;
+
+    if curriculum.track_version != track.track_version
+        || curriculum.content_version != track.content_version
+        || curriculum.source_manifest_version != track.source_manifest_version
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RegistryErrorResponse {
+                code: "invalid-curriculum",
+                error: "Curriculum and catalog versions do not match.".to_string(),
+            }),
+        ));
+    }
+
+    Ok(Json(curriculum))
 }
 
 fn registry_error_response(error: RegistryError) -> (StatusCode, Json<RegistryErrorResponse>) {
@@ -5135,6 +5174,29 @@ mod tests {
             .await
             .expect("catalog response");
         assert_eq!(catalog.status(), StatusCode::OK);
+
+        let curriculum = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v3/catalog/zcash/tracks/shielded-payments-safety/curriculum")
+                    .body(Body::empty())
+                    .expect("curriculum request"),
+            )
+            .await
+            .expect("curriculum response");
+        assert_eq!(curriculum.status(), StatusCode::OK);
+        let curriculum_body = to_bytes(curriculum.into_body(), 256 * 1024)
+            .await
+            .expect("curriculum body");
+        let curriculum_json: serde_json::Value =
+            serde_json::from_slice(&curriculum_body).expect("curriculum JSON");
+        assert_eq!(curriculum_json["lessons"].as_array().map(Vec::len), Some(5));
+        let curriculum_text =
+            String::from_utf8(curriculum_body.to_vec()).expect("curriculum UTF-8");
+        assert!(!curriculum_text.contains("correct_option_id"));
+        assert!(!curriculum_text.contains("seeded_defects"));
+        assert!(!curriculum_text.contains("privacy-google-wallet-linkage"));
 
         let spoofed = app
             .clone()

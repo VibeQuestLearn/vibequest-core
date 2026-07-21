@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-pub const SOURCE_MANIFEST_VERSION: &str = "zcash-sources-2026-07-21.1";
+pub const SOURCE_MANIFEST_VERSION: &str = "zcash-sources-2026-07-21.2";
 pub const LIBRUSTZCASH_REVISION: &str = "d47691c6b620e9c1fa3574a5a63deb4da544da2e";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

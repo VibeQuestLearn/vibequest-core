@@ -1,0 +1,27 @@
+{
+  "spec_version": "shielded-checkout-hidden-1.0.0",
+  "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "visibility": "runner-only",
+  "cases": [
+    {
+      "case_id": "ua-non-unified-shielded",
+      "assertion": "A standalone Sapling address cannot satisfy a Unified Address requirement."
+    },
+    {
+      "case_id": "zip321-transparent-memo",
+      "assertion": "A memo attached to a transparent recipient fails before intent acceptance."
+    },
+    {
+      "case_id": "viewing-malformed",
+      "assertion": "Malformed bounded input fails without appearing in output or diagnostics."
+    },
+    {
+      "case_id": "lifecycle-mismatch",
+      "assertion": "Recipient or exact-amount mismatch wins over confirmation and expiry state."
+    },
+    {
+      "case_id": "privacy-google-wallet-linkage",
+      "assertion": "No returned or emitted record links Google profile fields to wallet artifacts."
+    }
+  ]
+}

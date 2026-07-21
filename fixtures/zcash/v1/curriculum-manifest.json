@@ -1,0 +1,334 @@
+{
+  "curriculum_version": "zcash-shielded-payments-1.0.0",
+  "ecosystem_id": "zcash",
+  "track_id": "shielded-payments-safety",
+  "track_version": "1.0.0",
+  "content_version": "2026-07-21.1",
+  "source_manifest_version": "zcash-sources-2026-07-21.2",
+  "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "tutor_contract_version": "zcash-reviewed-tutor-1.0.0",
+  "reviewer_status": "reviewed",
+  "lessons": [
+    {
+      "lesson_id": "unified-address-policy",
+      "sequence": 1,
+      "title": "Unified Addresses and receiver policy",
+      "learner_outcome": "Inspect a Zcash address with typed protocol primitives, enforce the configured network, and select a supported shielded receiver without trusting its text prefix.",
+      "explainer": [
+        "A Unified Address is a typed container for one or more receiver types. The checkout must parse the container, confirm its network, inspect the Orchard, Sapling, transparent, and unknown receivers, then apply the scenario policy. For this track the preferred receiver is Orchard, with Sapling as the supported shielded fallback.",
+        "Parsing and policy are separate decisions. A syntactically valid address can still be wrong for the configured network, transparent-only, or forward-compatible in a way this verifier has not reviewed. The safe result is a bounded denial category; the raw address never belongs in an error or analytics event."
+      ],
+      "code_lens": {
+        "path": "scenarios/zcash/shielded-checkout/v1/solution/src/checkout.ts",
+        "symbol": "requireShieldedRecipient",
+        "language": "typescript",
+        "snippet": "if (!report.valid || summary.network !== expectedNetwork) return { ok: false, reason: \"recipient-policy\" };"
+      },
+      "source_references": [
+        "zip-0316",
+        "zcash-address-0.12.0",
+        "zcash-protocol-0.9.0"
+      ],
+      "misconception": "A string that starts with a familiar Zcash prefix is not proof of the expected network or a supported shielded receiver.",
+      "denial_case_ids": [
+        "ua-wrong-network",
+        "ua-transparent-only"
+      ],
+      "checkpoint": {
+        "checkpoint_id": "checkpoint-address-policy",
+        "prompt": "A valid testnet Unified Address contains Orchard, Sapling, and transparent receivers. Which checkout decision preserves this track's policy?",
+        "options": [
+          {
+            "option_id": "a",
+            "label": "Reject it because any transparent receiver makes the container unsafe."
+          },
+          {
+            "option_id": "b",
+            "label": "Accept the container and select Orchard after the network and receiver-policy checks pass."
+          },
+          {
+            "option_id": "c",
+            "label": "Select the shortest receiver string because it is cheapest to validate."
+          },
+          {
+            "option_id": "d",
+            "label": "Accept it from its utest prefix without decoding the receiver set."
+          }
+        ],
+        "correct_option_id": "b",
+        "rationale": "The reviewed policy accepts a Unified Address on the configured network and selects the best supported shielded receiver. It does not infer capabilities from a prefix or forbid a transparent receiver that is not selected."
+      },
+      "lab_bridge": "Repair requireShieldedRecipient so the shared checkout denies wrong-network and transparent-only inputs before returning a receiver.",
+      "scenario_step_id": "step-01-address-policy",
+      "content_version": "2026-07-21.1",
+      "reviewer_status": "reviewed",
+      "tutor_anchors": [
+        "Unified Address",
+        "receiver",
+        "network"
+      ]
+    },
+    {
+      "lesson_id": "zip321-request-policy",
+      "sequence": 2,
+      "title": "ZIP-321 requests and exact intent",
+      "learner_outcome": "Validate a bounded ZIP-321 request, including indexed payments, exact zatoshi amounts, memo compatibility, and required-parameter failure.",
+      "explainer": [
+        "ZIP-321 gives a canonical URI shape for one or more payments. A checkout still needs scenario policy: every recipient must pass the address boundary, required amounts must be present and positive, the total must stay below the lab limit, and a memo must target a memo-capable shielded recipient.",
+        "Unknown optional parameters may be retained, but an unknown req- parameter changes the contract and must fail closed. The merchant must compare the validated total and payment count with server-owned intent; Google account state, browser totals, labels, and messages are not payment evidence."
+      ],
+      "code_lens": {
+        "path": "scenarios/zcash/shielded-checkout/v1/solution/src/checkout.ts",
+        "symbol": "acceptPaymentRequest",
+        "language": "typescript",
+        "snippet": "const exactAmount = summary.totalZatoshis === expected.amountZatoshis;"
+      },
+      "source_references": [
+        "zip-0321",
+        "zip321-0.8.0",
+        "zcash-protocol-0.9.0"
+      ],
+      "misconception": "A URI that parses, or a signed-in Google account that submitted it, does not prove the request matches the merchant's expected recipient and amount.",
+      "denial_case_ids": [
+        "zip321-unknown-required",
+        "zip321-lab-amount-limit"
+      ],
+      "checkpoint": {
+        "checkpoint_id": "checkpoint-zip321-policy",
+        "prompt": "The official parser accepts a request with the right recipient and 2 ZEC, but the server-created intent requires 1 ZEC. What should the checkout do?",
+        "options": [
+          {
+            "option_id": "a",
+            "label": "Accept it because overpayment is always safer."
+          },
+          {
+            "option_id": "b",
+            "label": "Accept it when the learner is signed in with Google."
+          },
+          {
+            "option_id": "c",
+            "label": "Deny it because canonical parsing and exact merchant intent are separate checks."
+          },
+          {
+            "option_id": "d",
+            "label": "Rewrite the amount in the URI and treat the original request as paid."
+          }
+        ],
+        "correct_option_id": "c",
+        "rationale": "The parser establishes ZIP-321 structure. The checkout must separately bind the validated recipient, exact zatoshi total, and payment count to server-owned intent."
+      },
+      "lab_bridge": "Repair acceptPaymentRequest so only an exact, bounded request with a passing Core report can advance the shared checkout.",
+      "scenario_step_id": "step-02-payment-request",
+      "content_version": "2026-07-21.1",
+      "reviewer_status": "reviewed",
+      "tutor_anchors": [
+        "ZIP-321",
+        "zatoshi",
+        "required parameter"
+      ]
+    },
+    {
+      "lesson_id": "viewing-key-boundary",
+      "sequence": 3,
+      "title": "Viewing authority is not authentication",
+      "learner_outcome": "Distinguish incoming and full viewing authority from spending authority, payment matching, and Google account authentication.",
+      "explainer": [
+        "Unified Incoming Viewing Keys and Unified Full Viewing Keys can support detection without giving the lab spending authority. Incoming authority is narrower; full viewing authority exposes more wallet activity. Both are sensitive and must be handled as view-only capability, never as a password, account identifier, or permission to spend.",
+        "A valid viewing key can help an authorized detector find relevant transactions, but it does not prove which learner owns a Google session or that a particular checkout intent was paid. The detector must still match reviewed recipient and amount evidence, while the account boundary continues to use the server-verified Google subject and opaque user ID."
+      ],
+      "code_lens": {
+        "path": "scenarios/zcash/shielded-checkout/v1/solution/src/checkout.ts",
+        "symbol": "acceptViewingAuthority",
+        "language": "typescript",
+        "snippet": "if (!report.valid || summary.canSpend) return { ok: false, reason: \"viewing-key-boundary\" };"
+      },
+      "source_references": [
+        "zip-0316",
+        "zip-0032",
+        "zcash-address-0.12.0"
+      ],
+      "misconception": "Possessing a valid viewing key does not authenticate a learner, prove payment, or grant spending authority.",
+      "denial_case_ids": [
+        "viewing-spending-material",
+        "viewing-wrong-network"
+      ],
+      "checkpoint": {
+        "checkpoint_id": "checkpoint-viewing-authority",
+        "prompt": "Which statement correctly separates the checkout's identity and Zcash detection boundaries?",
+        "options": [
+          {
+            "option_id": "a",
+            "label": "A full viewing key replaces Google authentication because it identifies the wallet."
+          },
+          {
+            "option_id": "b",
+            "label": "Google identifies the learning account; reviewed view-only authority may support detection, which must still match payment intent."
+          },
+          {
+            "option_id": "c",
+            "label": "An incoming viewing key proves every outgoing payment made by the learner."
+          },
+          {
+            "option_id": "d",
+            "label": "The lab should accept spending material when detection is unavailable."
+          }
+        ],
+        "correct_option_id": "b",
+        "rationale": "Identity, viewing capability, and payment evidence are separate. The product authenticates the account with Google, rejects spending material, and evaluates payment evidence against merchant intent."
+      },
+      "lab_bridge": "Repair acceptViewingAuthority so the scenario accepts only reviewed non-spending capability and keeps identity and payment decisions separate.",
+      "scenario_step_id": "step-03-viewing-boundary",
+      "content_version": "2026-07-21.1",
+      "reviewer_status": "reviewed",
+      "tutor_anchors": [
+        "viewing authority",
+        "spending",
+        "Google"
+      ]
+    },
+    {
+      "lesson_id": "payment-lifecycle",
+      "sequence": 4,
+      "title": "Confirmations, reorgs, replay, and expiry",
+      "learner_outcome": "Model payment fulfillment as a deterministic state machine that resists zero-confirmation acceptance, duplicate observations, reorgs, mismatches, and expiry.",
+      "explainer": [
+        "A matching mempool observation is pending, not final. The checkout advances only after the configured confirmation threshold. If a previously confirmed observation disappears, it becomes reorged and fulfillment must be withdrawn until the payment is observed and confirmed again.",
+        "Observation IDs make retries idempotent: replaying the same evidence cannot create a second fulfillment. Multiple distinct matches are duplicated, recipient or amount disagreement is mismatched, and an unseen transaction beyond its expiry height is expired. These states are explicit so retries and chain changes do not collapse into a client-supplied paid boolean."
+      ],
+      "code_lens": {
+        "path": "scenarios/zcash/shielded-checkout/v1/solution/src/checkout.ts",
+        "symbol": "nextPaymentState",
+        "language": "typescript",
+        "snippet": "if (observation.observationId && seenObservationIds.has(observation.observationId)) return \"duplicated\";"
+      },
+      "source_references": [
+        "zip-0203",
+        "zcash-protocol-2026.7",
+        "zip-0321"
+      ],
+      "misconception": "Seeing a transaction once, especially with zero confirmations, is not enough to make fulfillment final or replay-safe.",
+      "denial_case_ids": [
+        "lifecycle-reorg",
+        "lifecycle-duplicate"
+      ],
+      "checkpoint": {
+        "checkpoint_id": "checkpoint-payment-lifecycle",
+        "prompt": "A previously confirmed payment is absent from the current chain view after a reorganization. Which state and action are correct?",
+        "options": [
+          {
+            "option_id": "a",
+            "label": "Keep it confirmed because completion records are immutable."
+          },
+          {
+            "option_id": "b",
+            "label": "Mark it expired immediately regardless of expiry height."
+          },
+          {
+            "option_id": "c",
+            "label": "Mark it reorged and withhold fulfillment until a matching observation reaches the threshold again."
+          },
+          {
+            "option_id": "d",
+            "label": "Create a second completion record from the old observation."
+          }
+        ],
+        "correct_option_id": "c",
+        "rationale": "A reorg can invalidate prior inclusion. The state machine records that loss explicitly and requires fresh matching evidence rather than trusting an earlier completion flag."
+      },
+      "lab_bridge": "Repair nextPaymentState so confirmation thresholds, replay IDs, reorgs, mismatches, and expiry produce distinct deterministic outcomes.",
+      "scenario_step_id": "step-04-payment-lifecycle",
+      "content_version": "2026-07-21.1",
+      "reviewer_status": "reviewed",
+      "tutor_anchors": [
+        "confirmation",
+        "reorg",
+        "observation"
+      ]
+    },
+    {
+      "lesson_id": "privacy-boundary",
+      "sequence": 5,
+      "title": "Privacy survives only through data minimization",
+      "learner_outcome": "Design checkout diagnostics and account records that preserve operational evidence without storing addresses, memos, viewing keys, payment requests, or wallet-to-Google linkages.",
+      "explainer": [
+        "Shielded transport does not protect data copied into application logs, analytics, support tickets, or account tables. The checkout records opaque request and scenario IDs, lifecycle state, and bounded rule IDs. It does not record a raw address, memo, payment URI, viewing key, or learner source body.",
+        "The Google subject identifies a learning account only. Linking that subject or email to wallet artifacts creates a new correlation surface and still does not prove payment. Detection and assessment records should use opaque server identifiers, short retention, and reproducible result digests; learner-facing errors should use reviewed categories rather than echoing sensitive input."
+      ],
+      "code_lens": {
+        "path": "scenarios/zcash/shielded-checkout/v1/solution/src/checkout.ts",
+        "symbol": "privacySafeEvent",
+        "language": "typescript",
+        "snippet": "return { requestId: event.requestId, scenarioId: event.scenarioId, state: event.state, ruleIds: event.ruleIds };"
+      },
+      "source_references": [
+        "zcash-protocol-2026.7",
+        "zip-0321",
+        "zcash-privacy-guidance"
+      ],
+      "misconception": "A shielded payment stays private even when the application logs its address, memo, payment URI, viewing key, or Google email.",
+      "denial_case_ids": [
+        "privacy-raw-address-log",
+        "privacy-memo-log"
+      ],
+      "checkpoint": {
+        "checkpoint_id": "checkpoint-privacy-boundary",
+        "prompt": "Which diagnostic event preserves enough evidence to investigate a failed checkout without creating a wallet-to-account linkage?",
+        "options": [
+          {
+            "option_id": "a",
+            "label": "Google email, Unified Address, memo, and the full ZIP-321 URI."
+          },
+          {
+            "option_id": "b",
+            "label": "Viewing key, transaction payload, and learner source code."
+          },
+          {
+            "option_id": "c",
+            "label": "Opaque request and scenario IDs, lifecycle state, and bounded verifier rule IDs."
+          },
+          {
+            "option_id": "d",
+            "label": "Raw Core error text plus every browser request header."
+          }
+        ],
+        "correct_option_id": "c",
+        "rationale": "Opaque identifiers and bounded states support correlation and debugging without copying wallet artifacts, authentication material, or learner code into general logs."
+      },
+      "lab_bridge": "Repair privacySafeEvent, run the full denial corpus, then explain why every removed field creates account or payment linkage risk.",
+      "scenario_step_id": "step-05-privacy-boundary",
+      "content_version": "2026-07-21.1",
+      "reviewer_status": "reviewed",
+      "tutor_anchors": [
+        "opaque",
+        "memo",
+        "linkage"
+      ]
+    }
+  ],
+  "capstone": {
+    "capstone_id": "capstone-shielded-checkout",
+    "title": "Repair the shielded checkout boundary",
+    "objective": "Repair all five allowlisted functions in the shared checkout, pass public and hidden denial cases, and submit a written explanation connecting each denial to its protocol, identity, lifecycle, or privacy boundary.",
+    "required_repairs": [
+      "defect-address-policy",
+      "defect-request-intent",
+      "defect-viewing-authority",
+      "defect-lifecycle-replay",
+      "defect-privacy-event"
+    ],
+    "required_explanations": [
+      "network-and-receiver-policy",
+      "zip321-and-merchant-intent",
+      "identity-viewing-and-payment-separation",
+      "confirmation-reorg-and-idempotency",
+      "logging-and-account-linkage"
+    ],
+    "completion_evidence": [
+      "repaired-source-digest",
+      "public-test-result-digest",
+      "hidden-test-result-digest",
+      "written-denial-rationale"
+    ],
+    "multiple_choice_sufficient": false
+  }
+}

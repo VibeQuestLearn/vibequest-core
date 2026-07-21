@@ -1,0 +1,316 @@
+{
+  "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "curriculum_version": "zcash-shielded-payments-1.0.0",
+  "source_manifest_version": "zcash-sources-2026-07-21.2",
+  "codebase_id": "shielded-checkout",
+  "language": "typescript",
+  "root_path": "scenarios/zcash/shielded-checkout/v1",
+  "allowlisted_edit_locations": [
+    {
+      "path": "starter/src/checkout.ts",
+      "symbol": "requireShieldedRecipient"
+    },
+    {
+      "path": "starter/src/checkout.ts",
+      "symbol": "acceptPaymentRequest"
+    },
+    {
+      "path": "starter/src/checkout.ts",
+      "symbol": "acceptViewingAuthority"
+    },
+    {
+      "path": "starter/src/checkout.ts",
+      "symbol": "nextPaymentState"
+    },
+    {
+      "path": "starter/src/checkout.ts",
+      "symbol": "privacySafeEvent"
+    }
+  ],
+  "seeded_defects": [
+    {
+      "defect_id": "defect-address-policy",
+      "lesson_id": "unified-address-policy",
+      "location": {
+        "path": "starter/src/checkout.ts",
+        "symbol": "requireShieldedRecipient"
+      }
+    },
+    {
+      "defect_id": "defect-request-intent",
+      "lesson_id": "zip321-request-policy",
+      "location": {
+        "path": "starter/src/checkout.ts",
+        "symbol": "acceptPaymentRequest"
+      }
+    },
+    {
+      "defect_id": "defect-viewing-authority",
+      "lesson_id": "viewing-key-boundary",
+      "location": {
+        "path": "starter/src/checkout.ts",
+        "symbol": "acceptViewingAuthority"
+      }
+    },
+    {
+      "defect_id": "defect-lifecycle-replay",
+      "lesson_id": "payment-lifecycle",
+      "location": {
+        "path": "starter/src/checkout.ts",
+        "symbol": "nextPaymentState"
+      }
+    },
+    {
+      "defect_id": "defect-privacy-event",
+      "lesson_id": "privacy-boundary",
+      "location": {
+        "path": "starter/src/checkout.ts",
+        "symbol": "privacySafeEvent"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "step_id": "step-01-address-policy",
+      "lesson_id": "unified-address-policy",
+      "entrypoint": "starter/src/checkout.ts#requireShieldedRecipient",
+      "verifier_ids": [
+        "zcash-address-policy"
+      ],
+      "valid_case_ids": [
+        "ua-valid-shielded"
+      ],
+      "denial_case_ids": [
+        "ua-wrong-network",
+        "ua-transparent-only",
+        "ua-non-unified-shielded"
+      ]
+    },
+    {
+      "step_id": "step-02-payment-request",
+      "lesson_id": "zip321-request-policy",
+      "entrypoint": "starter/src/checkout.ts#acceptPaymentRequest",
+      "verifier_ids": [
+        "zcash-zip321-payment-request"
+      ],
+      "valid_case_ids": [
+        "zip321-valid-exact"
+      ],
+      "denial_case_ids": [
+        "zip321-unknown-required",
+        "zip321-lab-amount-limit",
+        "zip321-transparent-memo"
+      ]
+    },
+    {
+      "step_id": "step-03-viewing-boundary",
+      "lesson_id": "viewing-key-boundary",
+      "entrypoint": "starter/src/checkout.ts#acceptViewingAuthority",
+      "verifier_ids": [
+        "zcash-viewing-key-boundary"
+      ],
+      "valid_case_ids": [
+        "viewing-valid-incoming"
+      ],
+      "denial_case_ids": [
+        "viewing-spending-material",
+        "viewing-wrong-network",
+        "viewing-malformed"
+      ]
+    },
+    {
+      "step_id": "step-04-payment-lifecycle",
+      "lesson_id": "payment-lifecycle",
+      "entrypoint": "starter/src/checkout.ts#nextPaymentState",
+      "verifier_ids": [
+        "zcash-payment-lifecycle"
+      ],
+      "valid_case_ids": [
+        "lifecycle-confirmed"
+      ],
+      "denial_case_ids": [
+        "lifecycle-reorg",
+        "lifecycle-duplicate",
+        "lifecycle-mismatch"
+      ]
+    },
+    {
+      "step_id": "step-05-privacy-boundary",
+      "lesson_id": "privacy-boundary",
+      "entrypoint": "starter/src/checkout.ts#privacySafeEvent",
+      "verifier_ids": [
+        "zcash-safe-diagnostics"
+      ],
+      "valid_case_ids": [
+        "privacy-safe-event"
+      ],
+      "denial_case_ids": [
+        "privacy-raw-address-log",
+        "privacy-memo-log",
+        "privacy-google-wallet-linkage"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "ua-valid-shielded",
+      "lesson_id": "unified-address-policy",
+      "visibility": "public",
+      "expected_outcome": "accepted",
+      "operation": "address-policy",
+      "summary": "Accept the reviewed mainnet Unified Address and select its Orchard receiver."
+    },
+    {
+      "case_id": "ua-wrong-network",
+      "lesson_id": "unified-address-policy",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "address-policy",
+      "summary": "Deny a mainnet Unified Address when the checkout expects testnet."
+    },
+    {
+      "case_id": "ua-transparent-only",
+      "lesson_id": "unified-address-policy",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "address-policy",
+      "summary": "Deny a transparent-only recipient under the shielded receiver policy."
+    },
+    {
+      "case_id": "ua-non-unified-shielded",
+      "lesson_id": "unified-address-policy",
+      "visibility": "hidden",
+      "expected_outcome": "denied",
+      "operation": "address-policy",
+      "summary": "Deny a standalone Sapling address where the checkout requires a Unified Address."
+    },
+    {
+      "case_id": "zip321-valid-exact",
+      "lesson_id": "zip321-request-policy",
+      "visibility": "public",
+      "expected_outcome": "accepted",
+      "operation": "payment-request",
+      "summary": "Accept one exact, bounded shielded payment with a compatible memo."
+    },
+    {
+      "case_id": "zip321-unknown-required",
+      "lesson_id": "zip321-request-policy",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "payment-request",
+      "summary": "Deny an unknown required ZIP-321 parameter."
+    },
+    {
+      "case_id": "zip321-lab-amount-limit",
+      "lesson_id": "zip321-request-policy",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "payment-request",
+      "summary": "Deny a protocol-valid amount above the lab's bounded checkout limit."
+    },
+    {
+      "case_id": "zip321-transparent-memo",
+      "lesson_id": "zip321-request-policy",
+      "visibility": "hidden",
+      "expected_outcome": "denied",
+      "operation": "payment-request",
+      "summary": "Deny memo data attached to a transparent recipient."
+    },
+    {
+      "case_id": "viewing-valid-incoming",
+      "lesson_id": "viewing-key-boundary",
+      "visibility": "public",
+      "expected_outcome": "accepted",
+      "operation": "viewing-key",
+      "summary": "Accept a synthetic testnet Unified Incoming Viewing Key as non-spending authority."
+    },
+    {
+      "case_id": "viewing-spending-material",
+      "lesson_id": "viewing-key-boundary",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "viewing-key",
+      "summary": "Reject a spending-key encoding before any viewing-key decode path."
+    },
+    {
+      "case_id": "viewing-wrong-network",
+      "lesson_id": "viewing-key-boundary",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "viewing-key",
+      "summary": "Reject testnet viewing authority when the scenario expects mainnet."
+    },
+    {
+      "case_id": "viewing-malformed",
+      "lesson_id": "viewing-key-boundary",
+      "visibility": "hidden",
+      "expected_outcome": "denied",
+      "operation": "viewing-key",
+      "summary": "Reject bounded malformed viewing-key input without echoing it."
+    },
+    {
+      "case_id": "lifecycle-confirmed",
+      "lesson_id": "payment-lifecycle",
+      "visibility": "public",
+      "expected_outcome": "accepted",
+      "operation": "payment-lifecycle",
+      "summary": "Fulfill one matching observation at the configured confirmation threshold."
+    },
+    {
+      "case_id": "lifecycle-reorg",
+      "lesson_id": "payment-lifecycle",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "payment-lifecycle",
+      "summary": "Withdraw fulfillment when a previously confirmed observation disappears."
+    },
+    {
+      "case_id": "lifecycle-duplicate",
+      "lesson_id": "payment-lifecycle",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "payment-lifecycle",
+      "summary": "Deny duplicate fulfillment from repeated observations."
+    },
+    {
+      "case_id": "lifecycle-mismatch",
+      "lesson_id": "payment-lifecycle",
+      "visibility": "hidden",
+      "expected_outcome": "denied",
+      "operation": "payment-lifecycle",
+      "summary": "Deny fulfillment when recipient or exact amount evidence mismatches intent."
+    },
+    {
+      "case_id": "privacy-safe-event",
+      "lesson_id": "privacy-boundary",
+      "visibility": "public",
+      "expected_outcome": "accepted",
+      "operation": "privacy-policy",
+      "summary": "Keep only opaque request and scenario IDs, state, and bounded rule IDs."
+    },
+    {
+      "case_id": "privacy-raw-address-log",
+      "lesson_id": "privacy-boundary",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "privacy-policy",
+      "summary": "Reject diagnostics that contain a raw address."
+    },
+    {
+      "case_id": "privacy-memo-log",
+      "lesson_id": "privacy-boundary",
+      "visibility": "public",
+      "expected_outcome": "denied",
+      "operation": "privacy-policy",
+      "summary": "Reject diagnostics that contain memo or payment-request content."
+    },
+    {
+      "case_id": "privacy-google-wallet-linkage",
+      "lesson_id": "privacy-boundary",
+      "visibility": "hidden",
+      "expected_outcome": "denied",
+      "operation": "privacy-policy",
+      "summary": "Reject account records that link Google profile fields to wallet artifacts."
+    }
+  ]
+}

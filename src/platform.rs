@@ -167,8 +167,8 @@ impl EcosystemRegistry {
                     .to_string(),
                 enabled: false,
                 status: TrackStatus::Building,
-                track_version: "0.1.0".to_string(),
-                content_version: "2026-07-21".to_string(),
+                track_version: "1.0.0".to_string(),
+                content_version: "2026-07-21.1".to_string(),
                 source_manifest_version: crate::zcash::SOURCE_MANIFEST_VERSION.to_string(),
                 lesson_count: 5,
             }],
@@ -180,6 +180,20 @@ impl EcosystemRegistry {
     }
 
     pub fn resolve_track(
+        &self,
+        ecosystem_id: &str,
+        track_id: &str,
+    ) -> Result<TrackRegistration, RegistryError> {
+        let track = self.registered_track(ecosystem_id, track_id)?;
+        if !track.enabled {
+            return Err(RegistryError::TrackDisabled {
+                track_id: track_id.to_string(),
+            });
+        }
+        Ok(track)
+    }
+
+    pub fn registered_track(
         &self,
         ecosystem_id: &str,
         track_id: &str,
@@ -204,13 +218,6 @@ impl EcosystemRegistry {
                 track_id: track_id.to_string(),
             })?;
         let track = &ecosystem.tracks[track_index];
-
-        if !track.enabled {
-            return Err(RegistryError::TrackDisabled {
-                track_id: track_id.to_string(),
-            });
-        }
-
         Ok(track.clone())
     }
 }
@@ -638,8 +645,8 @@ mod tests {
                 schema_version: SCHEMA_VERSION,
                 ecosystem_id: ZCASH_ECOSYSTEM_ID.to_string(),
                 track_id: SHIELDED_PAYMENTS_TRACK_ID.to_string(),
-                track_version: "0.1.0".to_string(),
-                content_version: "2026-07-21".to_string(),
+                track_version: "1.0.0".to_string(),
+                content_version: "2026-07-21.1".to_string(),
             },
             current_lesson_id: None,
             status: LearningSessionStatus::Active,
