@@ -1,0 +1,61 @@
+{
+  "manifest_version": "zcash-sources-2026-07-21.1",
+  "retrieved_at": "2026-07-21",
+  "supported_scope": "ZIP-316 Revision 0 Unified Address inspection and ZIP-321 ZEC payment request validation; no transaction construction, synchronization, or custody",
+  "sources": [
+    {
+      "source_id": "zip-0316",
+      "title": "ZIP 316: Unified Addresses and Unified Viewing Keys",
+      "version": "Active, Revision 2",
+      "url": "https://zips.z.cash/zip-0316",
+      "revision": "canonical specification retrieved 2026-07-21",
+      "license": "MIT",
+      "notes": "The pinned stable crate implements Revision 0 u/utest/uregtest encodings; Revision 2 zu/tu metadata is deliberately outside this verifier version."
+    },
+    {
+      "source_id": "zip-0321",
+      "title": "ZIP 321: Payment Request URIs",
+      "version": "Active",
+      "url": "https://zips.z.cash/zip-0321",
+      "revision": "canonical specification retrieved 2026-07-21",
+      "license": "MIT",
+      "notes": "ZEC payment requests only; custom asset req-asset handling is outside this verifier version."
+    },
+    {
+      "source_id": "zcash-address-0.12.0",
+      "title": "zcash_address",
+      "version": "0.12.0",
+      "url": "https://github.com/zcash/librustzcash/tree/d47691c6b620e9c1fa3574a5a63deb4da544da2e/components/zcash_address",
+      "revision": "d47691c6b620e9c1fa3574a5a63deb4da544da2e",
+      "license": "MIT OR Apache-2.0",
+      "notes": "Official typed address and Unified Address parsing primitive."
+    },
+    {
+      "source_id": "zcash-protocol-0.9.0",
+      "title": "zcash_protocol",
+      "version": "0.9.0",
+      "url": "https://github.com/zcash/librustzcash/tree/d47691c6b620e9c1fa3574a5a63deb4da544da2e/components/zcash_protocol",
+      "revision": "d47691c6b620e9c1fa3574a5a63deb4da544da2e",
+      "license": "MIT OR Apache-2.0",
+      "notes": "Official network and bounded Zatoshis value types."
+    },
+    {
+      "source_id": "zip321-0.8.0",
+      "title": "zip321",
+      "version": "0.8.0",
+      "url": "https://github.com/zcash/librustzcash/tree/d47691c6b620e9c1fa3574a5a63deb4da544da2e/components/zip321",
+      "revision": "d47691c6b620e9c1fa3574a5a63deb4da544da2e",
+      "license": "MIT OR Apache-2.0",
+      "notes": "Official ZIP-321 parser and canonical serializer."
+    },
+    {
+      "source_id": "zcash-unified-address-test-vectors",
+      "title": "Unified Address test vectors embedded by librustzcash",
+      "version": "zcash_address 0.12.0 fixture snapshot",
+      "url": "https://github.com/zcash/librustzcash/blob/d47691c6b620e9c1fa3574a5a63deb4da544da2e/components/zcash_address/src/kind/unified/address/test_vectors.rs",
+      "revision": "d47691c6b620e9c1fa3574a5a63deb4da544da2e",
+      "license": "MIT OR Apache-2.0",
+      "notes": "Derived from the official zcash-test-vectors unified_address generator."
+    }
+  ]
+}

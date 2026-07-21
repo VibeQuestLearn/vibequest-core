@@ -1,0 +1,86 @@
+[
+  {
+    "case_id": "pending-mempool",
+    "current_height": 3000000,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 1,
+    "current_confirmations": 0,
+    "previously_confirmed": false,
+    "recipient_matches": true,
+    "amount_matches": true,
+    "expected_state": "pending"
+  },
+  {
+    "case_id": "confirmed-threshold",
+    "current_height": 3000010,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 1,
+    "current_confirmations": 10,
+    "previously_confirmed": false,
+    "recipient_matches": true,
+    "amount_matches": true,
+    "expected_state": "confirmed"
+  },
+  {
+    "case_id": "reorg-after-confirmation",
+    "current_height": 3000011,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 0,
+    "current_confirmations": 0,
+    "previously_confirmed": true,
+    "recipient_matches": true,
+    "amount_matches": true,
+    "expected_state": "reorged"
+  },
+  {
+    "case_id": "duplicate-observation",
+    "current_height": 3000005,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 2,
+    "current_confirmations": 2,
+    "previously_confirmed": false,
+    "recipient_matches": true,
+    "amount_matches": true,
+    "expected_state": "duplicated"
+  },
+  {
+    "case_id": "expired-unseen",
+    "current_height": 3000041,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 0,
+    "current_confirmations": 0,
+    "previously_confirmed": false,
+    "recipient_matches": true,
+    "amount_matches": true,
+    "expected_state": "expired"
+  },
+  {
+    "case_id": "recipient-mismatch",
+    "current_height": 3000002,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 1,
+    "current_confirmations": 1,
+    "previously_confirmed": false,
+    "recipient_matches": false,
+    "amount_matches": true,
+    "expected_state": "mismatched"
+  },
+  {
+    "case_id": "amount-mismatch",
+    "current_height": 3000002,
+    "expires_at_height": 3000040,
+    "required_confirmations": 10,
+    "observation_count": 1,
+    "current_confirmations": 1,
+    "previously_confirmed": false,
+    "recipient_matches": true,
+    "amount_matches": false,
+    "expected_state": "mismatched"
+  }
+]

@@ -49,6 +49,12 @@ The `users` collection has a unique provider-plus-provider-subject index. Email 
 
 See `docs/authentication.md` for the trust boundary and key rotation procedure.
 
+## Zcash Domain Engine
+
+`src/zcash` is a network-free verifier boundary for the single shielded-checkout track. It uses exact official crate versions to inspect Revision 0 Unified Addresses, enforce receiver and network policy, validate bounded ZIP-321 ZEC requests, classify Unified Viewing Keys, and evaluate reviewed payment lifecycle fixtures.
+
+The engine returns rule IDs, source references, and safe messages without serializing raw addresses, memos, or viewing keys. It has no HTTP wallet route and cannot construct or sign a transaction. Track catalog records expose source manifest `zcash-sources-2026-07-21.1`; see `fixtures/zcash/v1/source-manifest.json` and `docs/zcash-dependency-decision.md`.
+
 ## Checks
 
 ```bash

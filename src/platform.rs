@@ -54,6 +54,7 @@ pub struct TrackRegistration {
     pub status: TrackStatus,
     pub track_version: String,
     pub content_version: String,
+    pub source_manifest_version: String,
     pub lesson_count: u16,
 }
 
@@ -168,6 +169,7 @@ impl EcosystemRegistry {
                 status: TrackStatus::Building,
                 track_version: "0.1.0".to_string(),
                 content_version: "2026-07-21".to_string(),
+                source_manifest_version: crate::zcash::SOURCE_MANIFEST_VERSION.to_string(),
                 lesson_count: 5,
             }],
         }])
@@ -597,6 +599,10 @@ mod tests {
         assert_eq!(catalog.ecosystems[0].ecosystem_id, ZCASH_ECOSYSTEM_ID);
         assert_eq!(catalog.ecosystems[0].tracks.len(), 1);
         assert!(!catalog.ecosystems[0].tracks[0].enabled);
+        assert_eq!(
+            catalog.ecosystems[0].tracks[0].source_manifest_version,
+            crate::zcash::SOURCE_MANIFEST_VERSION
+        );
     }
 
     #[test]

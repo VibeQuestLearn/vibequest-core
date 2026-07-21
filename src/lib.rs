@@ -7,6 +7,7 @@
 pub mod auth;
 
 pub mod platform;
+pub mod zcash;
 
 use auth::{AuthVerifier, AuthenticatedPrincipal};
 use axum::{
