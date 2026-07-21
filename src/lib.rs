@@ -1,5 +1,7 @@
 #![recursion_limit = "256"]
 
+pub mod platform;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -16,6 +18,9 @@ use mongodb::{
     options::ClientOptions,
 };
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey, signature::Verifier as _};
+use platform::{
+    CatalogResponse, EcosystemRegistry, PlatformStore, RegistryError, TrackRegistration,
+};
 use reqwest::{Client, StatusCode as ReqwestStatusCode};
 use ring::signature::{self, RsaPublicKeyComponents};
 use serde::{Deserialize, Serialize};
@@ -43,6 +48,8 @@ const TUTOR_OUTPUT_TOKENS: u16 = 780;
 pub struct AppState {
     config: AppConfig,
     openai: OpenAiClient,
+    registry: EcosystemRegistry,
+    platform_store: PlatformStore,
     fiber: FiberPayoutClient,
     store: MongoStore,
 }
@@ -60,6 +67,7 @@ struct AppConfig {
     reward_currency: String,
     mongodb_uri: Option<String>,
     mongodb_database: String,
+    mongodb_v3_database: String,
 }
 
 #[derive(Clone)]
@@ -1810,7 +1818,15 @@ pub fn app_state() -> Arc<AppState> {
 
     let config = AppConfig::from_env();
     let store = MongoStore::from_config(&config);
+    let registry =
+        EcosystemRegistry::zcash_only().expect("the built-in ecosystem registry must be valid");
+    let platform_store = PlatformStore::new(
+        config.mongodb_uri.clone(),
+        config.mongodb_v3_database.clone(),
+    );
     let state = Arc::new(AppState {
+        registry,
+        platform_store,
         openai: OpenAiClient::from_env(),
         fiber: FiberPayoutClient::from_config(&config),
         store,
@@ -1822,6 +1838,19 @@ pub fn app_state() -> Arc<AppState> {
     state
 }
 
+pub async fn initialize_platform(state: &Arc<AppState>) -> Result<(), String> {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state.platform_store.ensure_indexes(),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("failed to initialize v3 indexes: {error}")),
+        Err(_) => Err("v3 index initialization timed out after 5 seconds".to_string()),
+    }
+}
+
 pub fn app_port() -> u16 {
     AppConfig::from_env().port
 }
@@ -1830,6 +1859,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/v3/catalog", get(v3_catalog))
+        .route(
+            "/v3/catalog/{ecosystem_id}/tracks/{track_id}",
+            get(v3_track),
+        )
         .route("/season", get(season))
         .route("/users/bind", post(bind_wallet_user))
         .route("/users/{address}/quests", get(list_user_quests))
@@ -1896,6 +1930,8 @@ impl AppConfig {
             mongodb_uri: optional_env("MONGODB_URI"),
             mongodb_database: optional_env("MONGODB_DATABASE")
                 .unwrap_or_else(|| "vibequest".to_string()),
+            mongodb_v3_database: optional_env("MONGODB_DATABASE_V3")
+                .unwrap_or_else(|| platform::DEFAULT_V3_DATABASE.to_string()),
         }
     }
 }
@@ -2384,6 +2420,52 @@ impl ReasoningEffort {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct RegistryErrorResponse {
+    code: &'static str,
+    error: String,
+}
+
+async fn v3_catalog(State(state): State<Arc<AppState>>) -> Json<CatalogResponse> {
+    Json(state.registry.catalog())
+}
+
+async fn v3_track(
+    Path((ecosystem_id, track_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TrackRegistration>, (StatusCode, Json<RegistryErrorResponse>)> {
+    state
+        .registry
+        .resolve_track(&ecosystem_id, &track_id)
+        .map(Json)
+        .map_err(registry_error_response)
+}
+
+fn registry_error_response(error: RegistryError) -> (StatusCode, Json<RegistryErrorResponse>) {
+    let (status, code) = match error {
+        RegistryError::UnknownEcosystem(_) | RegistryError::UnknownTrack { .. } => {
+            (StatusCode::NOT_FOUND, "catalog-entry-not-found")
+        }
+        RegistryError::EcosystemDisabled(_) | RegistryError::TrackDisabled { .. } => {
+            (StatusCode::CONFLICT, "catalog-entry-disabled")
+        }
+        RegistryError::Empty
+        | RegistryError::EmptyEcosystemId
+        | RegistryError::DuplicateEcosystem(_)
+        | RegistryError::EmptyTrackId(_)
+        | RegistryError::DuplicateTrack { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "invalid-catalog")
+        }
+    };
+
+    (
+        status,
+        Json(RegistryErrorResponse {
+            code,
+            error: error.to_string(),
+        }),
+    )
+}
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mongodb_diagnostic = state.store.availability_diagnostic().await;
     let integrations = IntegrationStatus {
@@ -4993,7 +5075,10 @@ mod tests {
                 reward_currency: "Fibd".to_string(),
                 mongodb_uri: None,
                 mongodb_database: "vibequest".to_string(),
+                mongodb_v3_database: platform::DEFAULT_V3_DATABASE.to_string(),
             },
+            registry: EcosystemRegistry::zcash_only().expect("valid test registry"),
+            platform_store: PlatformStore::new(None, platform::DEFAULT_V3_DATABASE.to_string()),
             openai: OpenAiClient {
                 http: Client::new(),
                 api_key: Some("key".to_string()),

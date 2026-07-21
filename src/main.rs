@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use tracing::info;
-use vibequest_core::{app_state, build_router};
+use vibequest_core::{app_state, build_router, initialize_platform};
 
 #[tokio::main]
 async fn main() {
@@ -13,6 +13,9 @@ async fn main() {
         .init();
 
     let state = app_state();
+    if let Err(error) = initialize_platform(&state).await {
+        tracing::warn!(error = %error, "v3 index initialization failed");
+    }
     let app = build_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], vibequest_core::app_port()));
     let listener = tokio::net::TcpListener::bind(addr)
