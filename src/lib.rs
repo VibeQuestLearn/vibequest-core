@@ -1,13 +1,21 @@
 #![recursion_limit = "256"]
+#![allow(
+    dead_code,
+    reason = "legacy CKB implementation is intentionally unrouted during the v3 migration"
+)]
+
+pub mod auth;
 
 pub mod platform;
 
+use auth::{AuthVerifier, AuthenticatedPrincipal};
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::{HeaderValue, Method, StatusCode},
+    extract::{Extension, Path, Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -19,7 +27,8 @@ use mongodb::{
 };
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey, signature::Verifier as _};
 use platform::{
-    CatalogResponse, EcosystemRegistry, PlatformStore, RegistryError, TrackRegistration,
+    AccountDeletion, AccountExport, CatalogResponse, EcosystemRegistry, PlatformStore,
+    RegistryError, TrackRegistration,
 };
 use reqwest::{Client, StatusCode as ReqwestStatusCode};
 use ring::signature::{self, RsaPublicKeyComponents};
@@ -46,6 +55,7 @@ const TUTOR_OUTPUT_TOKENS: u16 = 780;
 
 #[derive(Clone)]
 pub struct AppState {
+    auth: AuthVerifier,
     config: AppConfig,
     openai: OpenAiClient,
     registry: EcosystemRegistry,
@@ -1824,7 +1834,12 @@ pub fn app_state() -> Arc<AppState> {
         config.mongodb_uri.clone(),
         config.mongodb_v3_database.clone(),
     );
+    let auth = AuthVerifier::from_env().unwrap_or_else(|error| {
+        warn!(error = %error, "Core assertion verification is disabled");
+        AuthVerifier::disabled()
+    });
     let state = Arc::new(AppState {
+        auth,
         registry,
         platform_store,
         openai: OpenAiClient::from_env(),
@@ -1856,6 +1871,14 @@ pub fn app_port() -> u16 {
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let protected = Router::new()
+        .route("/v3/me", get(v3_me).delete(v3_delete_account))
+        .route("/v3/me/export", get(v3_export_account))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authentication,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -1864,28 +1887,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v3/catalog/{ecosystem_id}/tracks/{track_id}",
             get(v3_track),
         )
-        .route("/season", get(season))
-        .route("/users/bind", post(bind_wallet_user))
-        .route("/users/{address}/quests", get(list_user_quests))
-        .route(
-            "/users/{address}/learning",
-            get(api_get_learning_session).post(api_save_learning_session),
-        )
-        .route(
-            "/users/{address}/learning/tutor",
-            post(api_save_learning_tutor_exchange),
-        )
-        .route("/quests/{run_id}", get(get_quest_run))
-        .route("/quests/{run_id}/progress", post(update_quest_progress))
-        .route("/quests/{run_id}/complete", post(complete_quest))
-        .route("/ai/quests/generate", post(generate_quest))
-        .route("/ai/learning/module", post(generate_learning_module))
-        .route(
-            "/ai/learning/lesson",
-            post(generate_learning_lesson_endpoint),
-        )
-        .route("/ai/learning/tutor", post(answer_learning_question))
-        .route("/ai/code/tutor", post(answer_code_question))
+        .merge(protected)
         .layer(cors_layer(&state.config))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -1893,8 +1895,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 fn cors_layer(config: &AppConfig) -> CorsLayer {
     let layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([axum::http::header::CONTENT_TYPE]);
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     if config.cors_origins.iter().any(|origin| origin == "*") {
         return layer.allow_origin(AllowOrigin::any());
@@ -2418,6 +2420,138 @@ impl ReasoningEffort {
             value => value,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct AuthBoundaryErrorResponse {
+    code: &'static str,
+    error: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct IdentityResponse {
+    user_id: String,
+    provider: String,
+    email: Option<String>,
+    name: Option<String>,
+    persistence_enabled: bool,
+}
+
+async fn require_authentication(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if !state.auth.configured() {
+        return auth_boundary_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity-unavailable",
+            "Identity verification is not configured.",
+        );
+    }
+
+    let assertion = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty() && !value.bytes().any(|byte| byte.is_ascii_whitespace()));
+    let Some(assertion) = assertion else {
+        return auth_boundary_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Authentication is required.",
+        );
+    };
+    let principal = match state.auth.verify_now(assertion) {
+        Ok(principal) => principal,
+        Err(_) => {
+            return auth_boundary_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Authentication is required.",
+            );
+        }
+    };
+
+    request.extensions_mut().insert(principal);
+    next.run(request).await
+}
+
+fn auth_boundary_error(status: StatusCode, code: &'static str, error: &'static str) -> Response {
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(AuthBoundaryErrorResponse { code, error }),
+    )
+        .into_response()
+}
+
+async fn v3_me(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    match state
+        .platform_store
+        .upsert_identity(
+            &principal.user_id,
+            &principal.provider,
+            &principal.provider_subject,
+            principal.email.as_deref(),
+            principal.name.as_deref(),
+        )
+        .await
+    {
+        Ok(persistence_enabled) => Json(IdentityResponse {
+            user_id: principal.user_id,
+            provider: principal.provider,
+            email: principal.email,
+            name: principal.name,
+            persistence_enabled,
+        })
+        .into_response(),
+        Err(_) => auth_boundary_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity-store-unavailable",
+            "The identity store is unavailable.",
+        ),
+    }
+}
+
+async fn v3_export_account(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AccountExport>, Response> {
+    state
+        .platform_store
+        .export_account(&principal.user_id)
+        .await
+        .map(Json)
+        .map_err(|_| {
+            auth_boundary_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity-store-unavailable",
+                "The identity store is unavailable.",
+            )
+        })
+}
+
+async fn v3_delete_account(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AccountDeletion>, Response> {
+    state
+        .platform_store
+        .delete_account(&principal.user_id)
+        .await
+        .map(Json)
+        .map_err(|_| {
+            auth_boundary_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity-store-unavailable",
+                "The identity store is unavailable.",
+            )
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -4883,6 +5017,169 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    const ROUTER_TEST_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+    fn router_test_state(auth: AuthVerifier) -> Arc<AppState> {
+        Arc::new(AppState {
+            auth,
+            config: AppConfig {
+                port: 8080,
+                app_env: "test".to_string(),
+                cors_origins: vec!["http://localhost:3000".to_string()],
+                ckb_rpc_url: None,
+                fiber_rpc_url: None,
+                fiber_payout_rpc_url: None,
+                fiber_payout_enabled: false,
+                reward_amount_shannons: 400,
+                reward_currency: "Fibd".to_string(),
+                mongodb_uri: None,
+                mongodb_database: "vibequest".to_string(),
+                mongodb_v3_database: platform::DEFAULT_V3_DATABASE.to_string(),
+            },
+            registry: EcosystemRegistry::zcash_only().expect("valid test registry"),
+            platform_store: PlatformStore::new(None, platform::DEFAULT_V3_DATABASE.to_string()),
+            openai: OpenAiClient {
+                http: Client::new(),
+                api_key: None,
+                model: DEFAULT_OPENAI_MODEL.to_string(),
+                base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+                reasoning_effort: DEFAULT_OPENAI_REASONING_EFFORT,
+                disable_response_storage: true,
+                timeout: Duration::from_secs(1),
+            },
+            fiber: FiberPayoutClient {
+                http: Client::new(),
+                rpc_url: None,
+                enabled: false,
+                timeout: Duration::from_secs(1),
+            },
+            store: MongoStore::disabled(),
+        })
+    }
+
+    fn router_test_assertion() -> (AuthVerifier, String, String) {
+        let encoded_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ROUTER_TEST_KEY);
+        let verifier = AuthVerifier::from_key_config(
+            format!("router-test:{encoded_key}"),
+            encoded_key,
+            "vibequest-web".to_string(),
+            "vibequest-core".to_string(),
+        )
+        .expect("valid router verifier");
+        let provider_subject = "router-google-subject";
+        let identity_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, ROUTER_TEST_KEY);
+        let identity_digest = ring::hmac::sign(
+            &identity_key,
+            format!("google:{provider_subject}").as_bytes(),
+        );
+        let user_id = format!(
+            "usr_{}",
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity_digest.as_ref())
+                [..32]
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_secs() as i64;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "alg": "HS256",
+                "typ": "JWT",
+                "kid": "router-test"
+            }))
+            .expect("header"),
+        );
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "iss": "vibequest-web",
+                "aud": "vibequest-core",
+                "sub": user_id,
+                "provider": "google",
+                "provider_sub": provider_subject,
+                "email": "learner@example.com",
+                "name": "Learner",
+                "iat": now,
+                "exp": now + 60,
+                "jti": "router-assertion"
+            }))
+            .expect("claims"),
+        );
+        let input = format!("{header}.{payload}");
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, ROUTER_TEST_KEY);
+        let signature = ring::hmac::sign(&signing_key, input.as_bytes());
+        let assertion = format!(
+            "{input}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref())
+        );
+
+        (verifier, assertion, user_id)
+    }
+
+    #[tokio::test]
+    async fn router_enforces_the_v3_identity_boundary() {
+        let (verifier, assertion, expected_user_id) = router_test_assertion();
+        let app = build_router(router_test_state(verifier));
+
+        let catalog = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v3/catalog")
+                    .body(Body::empty())
+                    .expect("catalog request"),
+            )
+            .await
+            .expect("catalog response");
+        assert_eq!(catalog.status(), StatusCode::OK);
+
+        let spoofed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v3/me")
+                    .header("x-vibequest-user-id", "usr_attacker")
+                    .body(Body::empty())
+                    .expect("spoofed request"),
+            )
+            .await
+            .expect("spoofed response");
+        assert_eq!(spoofed.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v3/me")
+                    .header(header::AUTHORIZATION, format!("Bearer {assertion}"))
+                    .body(Body::empty())
+                    .expect("authenticated request"),
+            )
+            .await
+            .expect("authenticated response");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        let authenticated_body = to_bytes(authenticated.into_body(), 64 * 1024)
+            .await
+            .expect("authenticated body");
+        let authenticated_json: serde_json::Value =
+            serde_json::from_slice(&authenticated_body).expect("identity JSON");
+        assert_eq!(authenticated_json["user_id"], expected_user_id);
+        assert_eq!(authenticated_json["persistence_enabled"], false);
+
+        let legacy = app
+            .oneshot(
+                Request::builder()
+                    .uri("/users/legacy-wallet/quests")
+                    .body(Body::empty())
+                    .expect("legacy request"),
+            )
+            .await
+            .expect("legacy response");
+        assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+    }
+
     fn ai_impl_fixture() -> String {
         "export type Receipt={reader:string;contentId:string;runId:string;ckbCell:string;invoice:string;preimage:string;channelState:string;witness:string;nonce:string};\nexport type Claim={reader:string;contentId:string;runId:string;ckbCell:string;nonce:string};\nexport function auditReceiptAccess(receipt:Receipt|undefined,claim:Claim){\n  if(!receipt)return false;\n  const sameReader=receipt.reader===claim.reader;\n  const sameContent=receipt.contentId===claim.contentId;\n  const sameRun=receipt.runId===claim.runId;\n  const sameNonce=receipt.nonce===claim.nonce&&receipt.witness.includes(claim.nonce);\n  const sameCell=receipt.ckbCell===claim.ckbCell&&receipt.channelState.includes(claim.ckbCell)&&receipt.witness.includes(claim.ckbCell);\n  const fiberProof=receipt.invoice.startsWith('fiber:')&&receipt.preimage.startsWith('PTLC-proof-');\n  return sameReader&&sameContent&&sameRun&&sameNonce&&sameCell&&fiberProof;\n}".to_string()
     }
@@ -5063,6 +5360,7 @@ mod tests {
     #[test]
     fn missing_integrations_include_ckb_and_fiber() {
         let state = AppState {
+            auth: AuthVerifier::disabled(),
             config: AppConfig {
                 port: 8080,
                 app_env: "test".to_string(),

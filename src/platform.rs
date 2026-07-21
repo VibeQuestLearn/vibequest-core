@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
 use mongodb::{
     Client as MongoClient, Database, IndexModel,
-    bson::{Document, doc},
+    bson::{DateTime as BsonDateTime, Document, doc},
     options::{ClientOptions, IndexOptions},
 };
 use serde::{Deserialize, Serialize};
@@ -295,6 +296,26 @@ pub struct CompletionReceiptV3 {
     pub completed_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AccountExport {
+    pub schema_version: u16,
+    pub generated_at: DateTime<Utc>,
+    pub persistence_enabled: bool,
+    pub profile: Option<Document>,
+    pub learning_sessions: Vec<Document>,
+    pub submissions: Vec<Document>,
+    pub completion_receipts: Vec<Document>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccountDeletion {
+    pub persistence_enabled: bool,
+    pub profiles_deleted: u64,
+    pub learning_sessions_deleted: u64,
+    pub submissions_deleted: u64,
+    pub completion_receipts_deleted: u64,
+}
+
 #[derive(Clone)]
 pub struct PlatformStore {
     uri: Option<String>,
@@ -315,6 +336,14 @@ impl PlatformStore {
         let Some(database) = self.database().await? else {
             return Ok(());
         };
+
+        database
+            .collection::<Document>("users")
+            .create_index(unique_index(
+                doc! { "provider": 1, "provider_subject": 1 },
+                "identity_provider_subject_unique",
+            ))
+            .await?;
 
         database
             .collection::<Document>("learning_sessions")
@@ -377,6 +406,141 @@ impl PlatformStore {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn upsert_identity(
+        &self,
+        user_id: &str,
+        provider: &str,
+        provider_subject: &str,
+        email: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<bool, mongodb::error::Error> {
+        let Some(database) = self.database().await? else {
+            return Ok(false);
+        };
+        let now = BsonDateTime::now();
+        let mut current_fields = doc! { "last_seen_at": now };
+        if let Some(email) = email {
+            current_fields.insert("email", email);
+        }
+        if let Some(name) = name {
+            current_fields.insert("name", name);
+        }
+
+        database
+            .collection::<Document>("users")
+            .update_one(
+                doc! { "provider": provider, "provider_subject": provider_subject },
+                doc! {
+                    "$set": current_fields,
+                    "$setOnInsert": {
+                        "_id": user_id,
+                        "user_id": user_id,
+                        "provider": provider,
+                        "provider_subject": provider_subject,
+                        "created_at": now,
+                    },
+                },
+            )
+            .upsert(true)
+            .await?;
+
+        Ok(true)
+    }
+
+    pub async fn export_account(
+        &self,
+        user_id: &str,
+    ) -> Result<AccountExport, mongodb::error::Error> {
+        let Some(database) = self.database().await? else {
+            return Ok(AccountExport {
+                schema_version: SCHEMA_VERSION,
+                generated_at: Utc::now(),
+                persistence_enabled: false,
+                profile: None,
+                learning_sessions: Vec::new(),
+                submissions: Vec::new(),
+                completion_receipts: Vec::new(),
+            });
+        };
+
+        let profile = database
+            .collection::<Document>("users")
+            .find_one(doc! { "_id": user_id })
+            .await?;
+        let learning_sessions = database
+            .collection::<Document>("learning_sessions")
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
+        let submissions = database
+            .collection::<Document>("submissions")
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
+        let completion_receipts = database
+            .collection::<Document>("completion_receipts")
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
+
+        Ok(AccountExport {
+            schema_version: SCHEMA_VERSION,
+            generated_at: Utc::now(),
+            persistence_enabled: true,
+            profile,
+            learning_sessions,
+            submissions,
+            completion_receipts,
+        })
+    }
+
+    pub async fn delete_account(
+        &self,
+        user_id: &str,
+    ) -> Result<AccountDeletion, mongodb::error::Error> {
+        let Some(database) = self.database().await? else {
+            return Ok(AccountDeletion {
+                persistence_enabled: false,
+                profiles_deleted: 0,
+                learning_sessions_deleted: 0,
+                submissions_deleted: 0,
+                completion_receipts_deleted: 0,
+            });
+        };
+
+        let learning_sessions_deleted = database
+            .collection::<Document>("learning_sessions")
+            .delete_many(doc! { "user_id": user_id })
+            .await?
+            .deleted_count;
+        let submissions_deleted = database
+            .collection::<Document>("submissions")
+            .delete_many(doc! { "user_id": user_id })
+            .await?
+            .deleted_count;
+        let completion_receipts_deleted = database
+            .collection::<Document>("completion_receipts")
+            .delete_many(doc! { "user_id": user_id })
+            .await?
+            .deleted_count;
+        let profiles_deleted = database
+            .collection::<Document>("users")
+            .delete_one(doc! { "_id": user_id })
+            .await?
+            .deleted_count;
+
+        Ok(AccountDeletion {
+            persistence_enabled: true,
+            profiles_deleted,
+            learning_sessions_deleted,
+            submissions_deleted,
+            completion_receipts_deleted,
+        })
     }
 
     async fn database(&self) -> Result<Option<Database>, mongodb::error::Error> {

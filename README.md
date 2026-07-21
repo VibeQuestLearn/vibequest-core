@@ -1,6 +1,6 @@
 # VibeQuestLearn Core
 
-Rust and Axum backend for the ecosystem-neutral VibeQuestLearn platform. The v3 boundary currently registers only one Zcash developer track.
+Rust and Axum backend for the ecosystem-neutral VibeQuestLearn platform. The active v3 boundary registers one focused Zcash developer track and accepts Google-backed identities only through signed Web assertions.
 
 ## Run
 
@@ -11,63 +11,43 @@ cargo run --bin vibequest-core
 
 The ignored local `.env` may be copied from the original repository. Never commit it.
 
-## V3 Environment
+## Identity Configuration
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `APP_ENV` | No | `development` | Runtime environment label. |
-| `PORT` | No | `8080` | Native HTTP port. |
-| `CORS_ORIGINS` | No | `http://localhost:3000` | Allowed Web origins. |
-| `MONGODB_URI` | For persistence | empty | Mongo connection used by the fresh v3 store. |
-| `MONGODB_DATABASE_V3` | No | `vibequestlearn_v3` | Fresh database namespace for neutral records. |
+| Variable | Required for protected routes | Purpose |
+| --- | --- | --- |
+| `CORE_ASSERTION_KEYS` | Yes | Comma-separated verification key ring shared with Web. |
+| `IDENTITY_DERIVATION_SECRET` | Yes | Independently derives the opaque ID from Google's stable `sub`. |
+| `CORE_ASSERTION_ISSUER` | No | Expected issuer, default `vibequest-web`. |
+| `CORE_ASSERTION_AUDIENCE` | No | Expected audience, default `vibequest-core`. |
+| `MONGODB_URI` | For persistence | Connection used by the fresh v3 store. |
+| `MONGODB_DATABASE_V3` | No | Fresh database namespace, default `vibequestlearn_v3`. |
 
-Legacy CKB, Fiber, payout, and OpenAI variables remain in `.env.example` only while compatibility routes compile. They are not part of the v3 catalog contract.
+Keys are unpadded base64url values decoding to at least 32 bytes. The identity derivation key must be independent of every signing and session key. Empty identity configuration disables protected routes with `503`; partial or malformed configuration also fails closed.
 
-## V3 Endpoints
+## Route Classes
 
-- `GET /v3/catalog` returns schema version 3 and the validated ecosystem registry.
-- `GET /v3/catalog/{ecosystem_id}/tracks/{track_id}` resolves enabled entries.
-- Unknown ecosystems and tracks return `404 catalog-entry-not-found`.
-- Registered but disabled entries return `409 catalog-entry-disabled`.
+Public:
 
-The current registry contains:
+- `GET /health`
+- `GET /ready`
+- `GET /v3/catalog`
+- `GET /v3/catalog/{ecosystem_id}/tracks/{track_id}`
 
-- ecosystem `zcash`, enabled
-- track `shielded-payments-safety`, building and disabled
-- ZIP-316 and ZIP-321 registration metadata
-- testnet, non-custodial lab scope
+Protected by the assertion middleware:
 
-## V3 Records
+- `GET /v3/me` upserts and returns the Google-backed profile.
+- `GET /v3/me/export` exports the principal's owned v3 records.
+- `DELETE /v3/me` deletes the principal's profile and owned v3 records.
 
-New contracts use opaque `user_id` ownership and a namespace containing:
+The inherited wallet-address, quest, AI, payout, and learning handlers are no longer registered in the router. They remain temporarily as unrouted migration source and cannot be called over HTTP.
 
-- `schema_version`
-- `ecosystem_id`
-- `track_id`
-- `track_version`
-- `content_version`
+## Ownership And Persistence
 
-Learning sessions, scenarios, submissions, and completion receipts have dedicated types and indexes. No wallet address, JoyID proof, CKB status, Fiber invoice, reward, or badge is required.
+Core verifies signature, key ID, issuer, audience, provider, issue time, expiry, maximum lifetime, and assertion ID. It then recomputes `user_id` from provider plus stable Google `sub`; a valid signature cannot assign an arbitrary owner.
 
-## Persistence
+The `users` collection has a unique provider-plus-provider-subject index. Email and display name are mutable metadata. All account export and deletion filters come from `AuthenticatedPrincipal`, never request paths or bodies.
 
-V3 uses `MONGODB_DATABASE_V3` and does not import legacy users or wallet-keyed records. Startup creates indexes for:
-
-- `learning_sessions`
-- `scenarios`
-- `submissions`
-- `completion_receipts`
-
-Connection selection is bounded at three seconds and total initialization at five seconds. Catalog startup continues when Mongo is unavailable.
-
-## Compatibility Boundary
-
-The inherited handlers remain temporarily available so the branch stays buildable while later chunks remove them. They still live in `src/lib.rs` and are not consumed by the active Web root.
-
-- wallet identity removal: Chunk 02
-- protocol replacement: Chunks 03-04
-- client-authoritative workbench removal: Chunks 05-06
-- legacy persistence removal: Chunk 07
+See `docs/authentication.md` for the trust boundary and key rotation procedure.
 
 ## Checks
 
