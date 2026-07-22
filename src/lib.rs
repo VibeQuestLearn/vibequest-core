@@ -251,10 +251,11 @@ impl GenerateLearningLessonRequest {
 
 #[derive(Debug, Serialize)]
 struct GenerateLearningModuleResponse {
-    module_id: Uuid,
+    module_id: String,
     source: QuestSource,
     module: LearningModule,
     warning: Option<String>,
+    persistence: PersistenceStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -416,10 +417,30 @@ struct LearningTutorMessage {
 struct LearningSessionDocument {
     #[serde(rename = "_id")]
     id: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    provider_subject: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     user_address: String,
-    wallet: WalletBinding,
+    #[serde(default)]
+    wallet: Option<WalletBinding>,
     source: QuestSource,
     module: LearningModule,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    learning_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    learning_intents: Vec<String>,
     selected_interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -433,10 +454,17 @@ struct LearningSessionDocument {
 
 #[derive(Debug, Deserialize)]
 struct SaveLearningSessionRequest {
-    wallet: WalletProof,
     module_id: Option<String>,
     source: Option<QuestSource>,
     module: LearningModule,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    learning_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    learning_intents: Vec<String>,
     selected_interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -449,14 +477,28 @@ struct SaveLearningSessionRequest {
 #[derive(Debug, Serialize)]
 struct LearningSessionResponse {
     session: Option<LearningSessionRecord>,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct SaveLearningSessionResponse {
+    session: Option<LearningSessionRecord>,
+    persistence: PersistenceStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct LearningSessionRecord {
     module_id: String,
-    user_address: String,
+    user_id: String,
+    provider: String,
+    email: Option<String>,
+    name: Option<String>,
     source: QuestSource,
     module: LearningModule,
+    ecosystem_id: Option<String>,
+    topic: Option<String>,
+    learning_profile: Option<String>,
+    learning_intents: Vec<String>,
     selected_interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -470,7 +512,8 @@ struct LearningSessionRecord {
 
 #[derive(Debug, Deserialize)]
 struct SaveTutorExchangeRequest {
-    wallet: WalletProof,
+    #[serde(default)]
+    module_id: Option<String>,
     module_title: String,
     lesson_title: String,
     lesson_context: String,
@@ -481,6 +524,40 @@ struct SaveTutorExchangeRequest {
 struct SavedTutorExchangeResponse {
     answer: LearningTutorResponse,
     session: Option<LearningSessionRecord>,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateLearningQuestRequest {
+    module_id: String,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    module_title: String,
+    learner_profile: String,
+    outcome: String,
+    lesson: LearningLesson,
+}
+
+#[derive(Debug, Serialize)]
+struct GenerateLearningQuestResponse {
+    run_id: String,
+    source: QuestSource,
+    learning_context: LearningQuestLink,
+    quest: QuestBlueprint,
+    runner: LearningQuestRunnerState,
+    persistence: PersistenceStatus,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningQuestRunnerState {
+    enabled: bool,
+    ecosystem_supported: bool,
+    scenario_id: String,
+    scenario_manifest_version: String,
+    runner_version: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1247,17 +1324,20 @@ impl MongoStore {
 
     async fn get_learning_session(
         &self,
-        address: &str,
+        user_id: &str,
     ) -> Result<Option<LearningSessionRecord>, ApiError> {
-        let address = address.trim();
-        if address.is_empty() {
-            return Err(ApiError::MissingWalletAddress);
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Ok(None);
         }
 
         let document = self
             .learning_sessions()
             .await?
-            .find_one(doc! { "user_address": address })
+            .find_one(doc! { "user_id": user_id })
             .await?;
 
         Ok(document.map(LearningSessionRecord::from))
@@ -1265,24 +1345,21 @@ impl MongoStore {
 
     async fn save_learning_session(
         &self,
-        address: &str,
+        principal: &AuthenticatedPrincipal,
         request: SaveLearningSessionRequest,
     ) -> Result<LearningSessionRecord, ApiError> {
-        validate_wallet_proof(&request.wallet)?;
-        let address = address.trim();
-        if address.is_empty() {
-            return Err(ApiError::MissingWalletAddress);
-        }
-        if request.wallet.address.trim() != address {
-            return Err(ApiError::WalletMismatch);
+        if !self.is_configured() {
+            return Err(ApiError::DatabaseUnavailable);
         }
 
-        let wallet = wallet_binding_from_proof(&request.wallet);
-        self.upsert_user(&wallet).await?;
+        let user_id = principal.user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
 
         let module = compact_learning_module(request.module)?;
         let sessions = self.learning_sessions().await?;
-        let existing = sessions.find_one(doc! { "user_address": address }).await?;
+        let existing = sessions.find_one(doc! { "user_id": user_id }).await?;
         let now = BsonDateTime::now();
         let id = request
             .module_id
@@ -1295,10 +1372,19 @@ impl MongoStore {
             .unwrap_or(now);
         let document = LearningSessionDocument {
             id: id.clone(),
-            user_address: address.to_string(),
-            wallet,
+            user_id: user_id.to_string(),
+            provider: principal.provider.clone(),
+            provider_subject: principal.provider_subject.clone(),
+            email: principal.email.clone(),
+            name: principal.name.clone(),
+            user_address: user_id.to_string(),
+            wallet: None,
             source: request.source.unwrap_or(QuestSource::OpenAi),
             module,
+            ecosystem_id: request.ecosystem_id.map(|value| clamp_text(value, 48)),
+            topic: request.topic.map(|value| clamp_text(value, 160)),
+            learning_profile: request.learning_profile.map(|value| clamp_text(value, 80)),
+            learning_intents: compact_string_list(request.learning_intents, 8, 120),
             selected_interests: compact_string_list(request.selected_interests, 8, 80),
             learner_goal: clamp_text(request.learner_goal, 360),
             background: clamp_text(request.background, 80),
@@ -1311,7 +1397,7 @@ impl MongoStore {
         };
 
         sessions
-            .replace_one(doc! { "user_address": address }, &document)
+            .replace_one(doc! { "user_id": user_id }, &document)
             .upsert(true)
             .await?;
 
@@ -1320,7 +1406,7 @@ impl MongoStore {
 
     async fn append_tutor_exchange(
         &self,
-        address: &str,
+        principal: &AuthenticatedPrincipal,
         request: &SaveTutorExchangeRequest,
         answer: &LearningTutorResponse,
     ) -> Result<Option<LearningSessionRecord>, ApiError> {
@@ -1328,13 +1414,21 @@ impl MongoStore {
             return Ok(None);
         }
 
-        let address = address.trim();
-        let mut session = match self
-            .learning_sessions()
-            .await?
-            .find_one(doc! { "user_address": address })
-            .await?
+        let user_id = principal.user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        let mut filter = doc! { "user_id": user_id };
+        if let Some(module_id) = request
+            .module_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         {
+            filter.insert("_id", module_id);
+        }
+
+        let mut session = match self.learning_sessions().await?.find_one(filter).await? {
             Some(session) => session,
             None => return Ok(None),
         };
@@ -1371,7 +1465,7 @@ impl MongoStore {
 
         self.learning_sessions()
             .await?
-            .replace_one(doc! { "_id": &session.id }, &session)
+            .replace_one(doc! { "_id": &session.id, "user_id": user_id }, &session)
             .await?;
 
         Ok(Some(session.into()))
@@ -1665,11 +1759,23 @@ impl From<QuestRunDocument> for QuestRunRecord {
 
 impl From<LearningSessionDocument> for LearningSessionRecord {
     fn from(session: LearningSessionDocument) -> Self {
+        let user_id = if session.user_id.trim().is_empty() {
+            session.user_address
+        } else {
+            session.user_id
+        };
         Self {
             module_id: session.id,
-            user_address: session.user_address,
+            user_id,
+            provider: session.provider,
+            email: session.email,
+            name: session.name,
             source: session.source,
             module: session.module,
+            ecosystem_id: session.ecosystem_id,
+            topic: session.topic,
+            learning_profile: session.learning_profile,
+            learning_intents: session.learning_intents,
             selected_interests: session.selected_interests,
             learner_goal: session.learner_goal,
             background: session.background,
@@ -1903,6 +2009,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(generate_learning_lesson_endpoint),
         )
         .route("/ai/learning/tutor", post(answer_learning_question))
+        .route(
+            "/ai/learning/tutor/save",
+            post(api_save_learning_tutor_exchange),
+        )
+        .route(
+            "/ai/learning/session",
+            get(api_get_learning_session).post(api_save_learning_session),
+        )
+        .route("/ai/learning/quest", post(generate_learning_quest))
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
         .route("/v3/submissions", post(v3_create_submission))
@@ -2939,7 +3054,13 @@ fn persistence_degraded_warning() -> String {
     "AI quest generated, but cloud save is temporarily unavailable. You can practice now; reward claim unlocks after persistence recovers.".to_string()
 }
 
+fn learning_persistence_degraded_warning() -> String {
+    "Learning state is active in this browser session, but cloud save is temporarily unavailable."
+        .to_string()
+}
+
 async fn generate_learning_module(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     State(state): State<Arc<AppState>>,
     Json(request): Json<GenerateLearningModuleRequest>,
 ) -> Result<Json<GenerateLearningModuleResponse>, ApiError> {
@@ -2957,12 +3078,56 @@ async fn generate_learning_module(
 
     let module = state.openai.generate_learning_module(&request).await?;
     let source = QuestSource::OpenAi;
+    let mut module_id = Uuid::new_v4().to_string();
+    let mut persistence = PersistenceStatus {
+        saved: false,
+        warning: None,
+    };
+
+    let save_request = SaveLearningSessionRequest {
+        module_id: Some(module_id.clone()),
+        source: Some(source),
+        module: module.clone(),
+        ecosystem_id: Some(learning_ecosystem_id(&request)),
+        topic: learning_topic_label(&request),
+        learning_profile: request.learning_profile.clone(),
+        learning_intents: request.learning_intents.clone(),
+        selected_interests: request.interests.clone(),
+        learner_goal: request.learner_goal.clone(),
+        background: request.background.clone(),
+        pace: request.pace.clone(),
+        active_lesson_index: 0,
+        checkpoint_answers: std::collections::BTreeMap::new(),
+        tutor_messages: Vec::new(),
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.save_learning_session(&principal, save_request),
+    )
+    .await
+    {
+        Ok(Ok(session)) => {
+            module_id = session.module_id;
+            persistence.saved = true;
+        }
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning module generated but persistence is degraded");
+            persistence.warning = Some(learning_persistence_degraded_warning());
+        }
+        Err(_) => {
+            warn!("learning module generated but persistence timed out");
+            persistence.warning = Some(learning_persistence_degraded_warning());
+        }
+        Ok(Err(error)) => return Err(error),
+    }
 
     Ok(Json(GenerateLearningModuleResponse {
-        module_id: Uuid::new_v4(),
+        module_id,
         source,
         module,
-        warning: None,
+        warning: persistence.warning.clone(),
+        persistence,
     }))
 }
 
@@ -3068,33 +3233,91 @@ async fn answer_code_question(
 }
 
 async fn api_get_learning_session(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
 ) -> Result<Json<LearningSessionResponse>, ApiError> {
-    Ok(Json(LearningSessionResponse {
-        session: state.store.get_learning_session(&address).await?,
-    }))
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.get_learning_session(&principal.user_id),
+    )
+    .await
+    {
+        Ok(Ok(session)) => Ok(Json(LearningSessionResponse {
+            persistence: PersistenceStatus {
+                saved: session.is_some(),
+                warning: if state.store.is_configured() {
+                    None
+                } else {
+                    Some(learning_persistence_degraded_warning())
+                },
+            },
+            session,
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session resume is degraded");
+            Ok(Json(LearningSessionResponse {
+                session: None,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningSessionResponse {
+            session: None,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
 }
 
 async fn api_save_learning_session(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
     Json(request): Json<SaveLearningSessionRequest>,
-) -> Result<Json<LearningSessionRecord>, ApiError> {
-    Ok(Json(
-        state.store.save_learning_session(&address, request).await?,
-    ))
+) -> Result<Json<SaveLearningSessionResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.save_learning_session(&principal, request),
+    )
+    .await
+    {
+        Ok(Ok(session)) => Ok(Json(SaveLearningSessionResponse {
+            session: Some(session),
+            persistence: PersistenceStatus {
+                saved: true,
+                warning: None,
+            },
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session save is degraded");
+            Ok(Json(SaveLearningSessionResponse {
+                session: None,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(SaveLearningSessionResponse {
+            session: None,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
 }
 
 async fn api_save_learning_tutor_exchange(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
     Json(request): Json<SaveTutorExchangeRequest>,
 ) -> Result<Json<SavedTutorExchangeResponse>, ApiError> {
-    validate_wallet_proof(&request.wallet)?;
-    if request.wallet.address.trim() != address.trim() {
-        return Err(ApiError::WalletMismatch);
-    }
     if request.question.trim().chars().count() < 4 {
         return Err(ApiError::InvalidPrompt);
     }
@@ -3108,12 +3331,132 @@ async fn api_save_learning_tutor_exchange(
             question: request.question.clone(),
         })
         .await?;
-    let session = state
-        .store
-        .append_tutor_exchange(&address, &request, &answer)
-        .await?;
+    let mut persistence = PersistenceStatus {
+        saved: false,
+        warning: None,
+    };
+    let session = match tokio::time::timeout(
+        Duration::from_secs(3),
+        state
+            .store
+            .append_tutor_exchange(&principal, &request, &answer),
+    )
+    .await
+    {
+        Ok(Ok(session)) => {
+            persistence.saved = session.is_some();
+            session
+        }
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning tutor answered but persistence is degraded");
+            persistence.warning = Some(learning_persistence_degraded_warning());
+            None
+        }
+        Err(_) => {
+            persistence.warning = Some(learning_persistence_degraded_warning());
+            None
+        }
+        Ok(Err(error)) => return Err(error),
+    };
 
-    Ok(Json(SavedTutorExchangeResponse { answer, session }))
+    Ok(Json(SavedTutorExchangeResponse {
+        answer,
+        session,
+        persistence,
+    }))
+}
+
+async fn generate_learning_quest(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<GenerateLearningQuestRequest>,
+) -> Result<Json<GenerateLearningQuestResponse>, ApiError> {
+    let learning_context = learning_quest_link_from_generated_lesson(&request)?;
+    let ecosystem_id = request
+        .ecosystem_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("zcash");
+    let build_prompt = learning_quest_prompt_from_request(&request, ecosystem_id);
+    let mut quest_request = GenerateQuestRequest {
+        build_prompt,
+        skill_track: Some(skill_track_for_learning_ecosystem(ecosystem_id).to_string()),
+        difficulty: Some(Difficulty::Builder),
+        wallet: wallet_proof_from_principal(&principal),
+        learning_context: Some(learning_context.clone()),
+    };
+
+    let quest = state.openai.generate_quest(&quest_request).await?;
+    let source = QuestSource::OpenAi;
+    let run_id = Uuid::new_v4().to_string();
+    let ecosystem_supported = ecosystem_id.eq_ignore_ascii_case("zcash");
+    let runner_manifest = runner::runner_manifest();
+    let mut persistence = PersistenceStatus {
+        saved: false,
+        warning: None,
+    };
+
+    let legacy_response = GenerateQuestResponse {
+        run_id: Uuid::parse_str(&run_id).unwrap_or_else(|_| Uuid::new_v4()),
+        source,
+        learning_context: Some(learning_context.clone()),
+        wallet: identity_binding_from_principal(&principal),
+        quest: quest.clone(),
+        ship_requirements: ShipRequirements {
+            ckb_rpc_ready: state.config.ckb_rpc_url.is_some(),
+            fiber_rpc_ready: state.config.fiber_rpc_url.is_some(),
+            can_claim_rewards: state.config.ckb_rpc_url.is_some()
+                && state.config.fiber_rpc_url.is_some(),
+        },
+        persistence: PersistenceStatus {
+            saved: false,
+            warning: None,
+        },
+        warning: None,
+    };
+    quest_request.learning_context = Some(learning_context.clone());
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.record_generated_quest(
+            &quest_request,
+            &legacy_response,
+            state.config.reward_amount_shannons,
+            &state.config.reward_currency,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            persistence.saved = state.store.is_configured();
+        }
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning quest generated but persistence is degraded");
+            persistence.warning = Some(persistence_degraded_warning());
+        }
+        Err(_) => {
+            warn!("learning quest generated but persistence timed out");
+            persistence.warning = Some(persistence_degraded_warning());
+        }
+        Ok(Err(error)) => return Err(error),
+    }
+
+    Ok(Json(GenerateLearningQuestResponse {
+        run_id,
+        source,
+        learning_context,
+        quest,
+        runner: LearningQuestRunnerState {
+            enabled: state.runner.is_enabled(),
+            ecosystem_supported,
+            scenario_id: runner::RUNNER_SCENARIO_ID.to_string(),
+            scenario_manifest_version: runner_manifest.scenario_manifest_version.clone(),
+            runner_version: runner::RUNNER_VERSION.to_string(),
+        },
+        warning: persistence.warning.clone(),
+        persistence,
+    }))
 }
 
 async fn bind_wallet_user(
@@ -4100,6 +4443,144 @@ fn compact_learning_quest_link(link: LearningQuestLink) -> LearningQuestLink {
         correct_answer: clamp_text(link.correct_answer, 220),
         misunderstanding: clamp_text(link.misunderstanding, 240),
         lesson_summary: clamp_text(link.lesson_summary, 260),
+    }
+}
+
+fn learning_quest_link_from_generated_lesson(
+    request: &GenerateLearningQuestRequest,
+) -> Result<LearningQuestLink, ApiError> {
+    if request.module_id.trim().is_empty()
+        || request.module_title.trim().is_empty()
+        || request.lesson.title.trim().is_empty()
+    {
+        return Err(ApiError::InvalidPrompt);
+    }
+    let correct_answer = request
+        .lesson
+        .checkpoint
+        .options
+        .get(request.lesson.checkpoint.correct_index)
+        .map(|option| option.label.clone())
+        .unwrap_or_else(|| request.lesson.checkpoint.explanation.clone());
+    let misunderstanding = request
+        .lesson
+        .checkpoint
+        .options
+        .iter()
+        .enumerate()
+        .find(|(index, option)| {
+            *index != request.lesson.checkpoint.correct_index && !option.feedback.trim().is_empty()
+        })
+        .map(|(_, option)| option.feedback.clone())
+        .unwrap_or_else(|| request.lesson.checkpoint.follow_up_question.clone());
+
+    Ok(compact_learning_quest_link(LearningQuestLink {
+        module_id: request.module_id.clone(),
+        lesson_id: request.lesson.id.clone(),
+        module_title: request.module_title.clone(),
+        lesson_title: request.lesson.title.clone(),
+        checkpoint_question: request.lesson.checkpoint.question.clone(),
+        quest_bridge: request.lesson.quest_bridge.clone(),
+        concepts: request.lesson.concepts.clone(),
+        correct_answer,
+        misunderstanding,
+        lesson_summary: request.lesson.explanation.clone(),
+    }))
+}
+
+fn learning_quest_prompt_from_request(
+    request: &GenerateLearningQuestRequest,
+    ecosystem_id: &str,
+) -> String {
+    let ecosystem_directive = match ecosystem_id.to_ascii_lowercase().as_str() {
+        "ckb" => {
+            "Focus on CKB cells, OutPoints, scripts, witnesses, transaction proof boundaries, and denial tests for replay or mismatched cell state."
+        }
+        "fiber" => {
+            "Focus on Fiber invoices, channels, PTLC/preimage evidence, receipt replay defense, routing assumptions, and unpaid denial paths."
+        }
+        "zcash" => {
+            "Focus on Zcash shielded checkout, ZIP-321 payment request validation, viewing-key boundaries, memo/privacy safety, and denial tests for unsafe recipients or wrong-network state."
+        }
+        _ => {
+            "Focus on one concrete protocol boundary, generated implementation files, verifier checks, and denial tests tied to the lesson."
+        }
+    };
+
+    format!(
+        "Generate a code quest from this completed VibeQuest lesson. Ecosystem: {ecosystem_id}. Topic: {topic}. Learner profile: {profile}. Module: {module}. Outcome: {outcome}. Lesson: {lesson}. Why it matters: {why}. Concepts: {concepts}. Checkpoint: {checkpoint}. Correct answer: {answer}. Misunderstanding to defend against: {misunderstanding}. Quest bridge: {bridge}. {ecosystem_directive} Return implementation files, tests, a code explainer, and a boss challenge. Keep the scope narrow and executable; do not broaden into a generic ecosystem overview.",
+        topic = request
+            .topic
+            .as_deref()
+            .unwrap_or("generated lesson practice"),
+        profile = request.learner_profile,
+        module = request.module_title,
+        outcome = request.outcome,
+        lesson = request.lesson.title,
+        why = request.lesson.why_it_matters,
+        concepts = request.lesson.concepts.join(", "),
+        checkpoint = request.lesson.checkpoint.question,
+        answer = request
+            .lesson
+            .checkpoint
+            .options
+            .get(request.lesson.checkpoint.correct_index)
+            .map(|option| option.label.as_str())
+            .unwrap_or("the checkpoint explanation"),
+        misunderstanding = request
+            .lesson
+            .checkpoint
+            .options
+            .iter()
+            .enumerate()
+            .find(|(index, option)| {
+                *index != request.lesson.checkpoint.correct_index
+                    && !option.feedback.trim().is_empty()
+            })
+            .map(|(_, option)| option.feedback.as_str())
+            .unwrap_or(request.lesson.checkpoint.follow_up_question.as_str()),
+        bridge = request.lesson.quest_bridge,
+    )
+}
+
+fn skill_track_for_learning_ecosystem(ecosystem_id: &str) -> &'static str {
+    match ecosystem_id.to_ascii_lowercase().as_str() {
+        "ckb" => "CKB Fundamentals",
+        "fiber" => "Fiber Builder",
+        "zcash" => "Zcash Shielded Payments",
+        _ => "Protocol Builder",
+    }
+}
+
+fn identity_binding_from_principal(principal: &AuthenticatedPrincipal) -> WalletBinding {
+    WalletBinding {
+        address: principal.user_id.clone(),
+        identity: principal.provider_subject.clone(),
+        sign_type: principal.provider.clone(),
+        message: principal
+            .email
+            .clone()
+            .or_else(|| principal.name.clone())
+            .unwrap_or_else(|| "google-authenticated".to_string()),
+    }
+}
+
+fn wallet_proof_from_principal(principal: &AuthenticatedPrincipal) -> WalletProof {
+    WalletProof {
+        address: principal.user_id.clone(),
+        message: format!(
+            "VibeQuest Google-authenticated quest for {}",
+            principal.user_id
+        ),
+        signature: WalletSignature {
+            signature: principal.assertion_id.clone(),
+            identity: principal.provider_subject.clone(),
+            sign_type: principal.provider.clone(),
+            pubkey: None,
+            key_type: None,
+            challenge: None,
+            alg: None,
+        },
     }
 }
 
