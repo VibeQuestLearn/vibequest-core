@@ -39,6 +39,9 @@ Protected by the assertion middleware:
 - `GET /v3/me` upserts and returns the Google-backed profile.
 - `GET /v3/me/export` exports the principal's owned v3 records.
 - `DELETE /v3/me` deletes the principal's profile and owned v3 records.
+- `POST /v3/submissions` validates one reviewed scenario submission; it fails closed pending runner review.
+- `GET /v3/submissions/{submission_id}` returns only the authenticated principal's bounded result view.
+- `DELETE /v3/submissions/{submission_id}` requests terminal cancellation for the owner.
 
 The inherited wallet-address, quest, AI, payout, and learning handlers are no longer registered in the router. They remain temporarily as unrouted migration source and cannot be called over HTTP.
 
@@ -63,6 +66,12 @@ The engine returns rule IDs, source references, and safe messages without serial
 The public curriculum endpoint works while the track is in `building` state, but returns only reviewed teaching content, code lenses, source links, checkpoint prompts, and aggregate case counts. Correct answers, rationales, hidden case IDs, seeded defects, and the solution body remain server-side.
 
 AI output is optional and non-authoritative. Accepted artifacts must match one lesson and scenario version, cite only reviewed sources, and contain lesson-specific anchors. A bounded in-memory cache stores accepted artifacts; when a provider is unavailable, the contract returns reviewed local material. AI never defines tests, execution evidence, or completion.
+
+## Isolated Scenario Runner
+
+The pinned dependency-free Node worker executes only the shielded-checkout scenario in a locked-down Docker container. Jobs and signed evidence bind user, submission, scenario, source, tests, protocol, and runner versions. Output is truncated and raw learner diagnostics are not returned.
+
+Production execution remains disabled and catalog status is `review-required` until an external queue adapter is reviewed. The Core API never loads the worker private signing key. See `docs/runner-operations.md` for the exact limits, adversarial acceptance suite, key boundary, and enablement checklist.
 
 ## Checks
 

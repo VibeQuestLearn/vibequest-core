@@ -105,6 +105,7 @@ pub enum ExpectedOutcome {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ScenarioManifest {
     pub scenario_manifest_version: String,
+    pub runner_manifest_version: String,
     pub curriculum_version: String,
     pub source_manifest_version: String,
     pub codebase_id: String,
@@ -179,6 +180,7 @@ pub struct PublicCurriculum {
     pub content_version: String,
     pub source_manifest_version: String,
     pub scenario_manifest_version: String,
+    pub runner_manifest_version: String,
     pub tutor_contract_version: String,
     pub reviewer_status: ReviewerStatus,
     pub lessons: Vec<PublicLesson>,
@@ -317,6 +319,10 @@ pub fn validate_reviewed_artifacts() -> Result<(), CurriculumValidationError> {
             && scenarios.scenario_manifest_version == SCENARIO_MANIFEST_VERSION
             && tutor.scenario_manifest_version == SCENARIO_MANIFEST_VERSION,
         "scenario manifest versions do not match",
+    )?;
+    ensure(
+        scenarios.runner_manifest_version == crate::runner::RUNNER_MANIFEST_VERSION,
+        "runner manifest version does not match the scenario",
     )?;
     ensure(
         curriculum.source_manifest_version == SOURCE_MANIFEST_VERSION
@@ -554,6 +560,9 @@ pub fn public_curriculum() -> Result<PublicCurriculum, CurriculumValidationError
         content_version: curriculum.content_version.clone(),
         source_manifest_version: curriculum.source_manifest_version.clone(),
         scenario_manifest_version: curriculum.scenario_manifest_version.clone(),
+        runner_manifest_version: crate::runner::runner_manifest()
+            .runner_manifest_version
+            .clone(),
         tutor_contract_version: curriculum.tutor_contract_version.clone(),
         reviewer_status: curriculum.reviewer_status,
         lessons,

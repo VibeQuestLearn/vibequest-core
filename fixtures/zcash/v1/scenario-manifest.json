@@ -1,5 +1,6 @@
 {
   "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "runner_manifest_version": "shielded-checkout-runner-1.0.0",
   "curriculum_version": "zcash-shielded-payments-1.0.0",
   "source_manifest_version": "zcash-sources-2026-07-21.2",
   "codebase_id": "shielded-checkout",

@@ -55,7 +55,17 @@ pub struct TrackRegistration {
     pub track_version: String,
     pub content_version: String,
     pub source_manifest_version: String,
+    pub runner_manifest_version: String,
+    pub runner_version: String,
+    pub runner_status: RunnerStatus,
     pub lesson_count: u16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunnerStatus {
+    ReviewRequired,
+    Enabled,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -170,6 +180,9 @@ impl EcosystemRegistry {
                 track_version: "1.0.0".to_string(),
                 content_version: "2026-07-21.1".to_string(),
                 source_manifest_version: crate::zcash::SOURCE_MANIFEST_VERSION.to_string(),
+                runner_manifest_version: crate::runner::RUNNER_MANIFEST_VERSION.to_string(),
+                runner_version: crate::runner::RUNNER_VERSION.to_string(),
+                runner_status: RunnerStatus::ReviewRequired,
                 lesson_count: 5,
             }],
         }])

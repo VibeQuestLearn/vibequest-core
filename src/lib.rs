@@ -8,6 +8,7 @@ pub mod auth;
 pub mod curriculum;
 
 pub mod platform;
+pub mod runner;
 pub mod zcash;
 
 use auth::{AuthVerifier, AuthenticatedPrincipal};
@@ -17,7 +18,7 @@ use axum::{
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -58,6 +59,7 @@ const TUTOR_OUTPUT_TOKENS: u16 = 780;
 #[derive(Clone)]
 pub struct AppState {
     auth: AuthVerifier,
+    runner: runner::RunnerService,
     config: AppConfig,
     openai: OpenAiClient,
     registry: EcosystemRegistry,
@@ -1842,6 +1844,7 @@ pub fn app_state() -> Arc<AppState> {
     });
     let state = Arc::new(AppState {
         auth,
+        runner: runner::RunnerService::from_environment(),
         registry,
         platform_store,
         openai: OpenAiClient::from_env(),
@@ -1876,6 +1879,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
+        .route("/v3/submissions", post(v3_create_submission))
+        .route(
+            "/v3/submissions/{submission_id}",
+            get(v3_get_submission).delete(v3_cancel_submission),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_authentication,
@@ -2443,6 +2451,12 @@ struct IdentityResponse {
     persistence_enabled: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct RunnerErrorResponse {
+    code: &'static str,
+    error: &'static str,
+}
+
 async fn require_authentication(
     State(state): State<Arc<AppState>>,
     mut request: Request,
@@ -2558,6 +2572,79 @@ async fn v3_delete_account(
                 "The identity store is unavailable.",
             )
         })
+}
+
+async fn v3_create_submission(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<runner::CreateSubmissionRequest>,
+) -> Result<(StatusCode, Json<runner::RunnerSubmissionView>), Response> {
+    state
+        .runner
+        .submit(&principal.user_id, request)
+        .await
+        .map(|submission| (StatusCode::ACCEPTED, Json(submission)))
+        .map_err(runner_error_response)
+}
+
+async fn v3_get_submission(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<runner::RunnerSubmissionView>, Response> {
+    state
+        .runner
+        .get(&principal.user_id, &submission_id)
+        .await
+        .map(Json)
+        .map_err(runner_error_response)
+}
+
+async fn v3_cancel_submission(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Path(submission_id): Path<String>,
+) -> Result<Json<runner::RunnerSubmissionView>, Response> {
+    state
+        .runner
+        .cancel(&principal.user_id, &submission_id)
+        .await
+        .map(Json)
+        .map_err(runner_error_response)
+}
+
+fn runner_error_response(error: runner::RunnerServiceError) -> Response {
+    let (status, code, message) = match error {
+        runner::RunnerServiceError::Disabled => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runner-review-required",
+            "The isolated runner is unavailable pending production review.",
+        ),
+        runner::RunnerServiceError::InvalidRequest => (
+            StatusCode::BAD_REQUEST,
+            "invalid-submission",
+            "The submission does not match the reviewed scenario contract.",
+        ),
+        runner::RunnerServiceError::QueueFull => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "runner-queue-full",
+            "The isolated runner queue is full.",
+        ),
+        runner::RunnerServiceError::NotFound => (
+            StatusCode::NOT_FOUND,
+            "submission-not-found",
+            "The submission was not found.",
+        ),
+    };
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(RunnerErrorResponse {
+            code,
+            error: message,
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -5065,6 +5152,7 @@ mod tests {
     fn router_test_state(auth: AuthVerifier) -> Arc<AppState> {
         Arc::new(AppState {
             auth,
+            runner: runner::RunnerService::disabled(),
             config: AppConfig {
                 port: 8080,
                 app_env: "test".to_string(),
@@ -5174,6 +5262,19 @@ mod tests {
             .await
             .expect("catalog response");
         assert_eq!(catalog.status(), StatusCode::OK);
+        let catalog_body = to_bytes(catalog.into_body(), 64 * 1024)
+            .await
+            .expect("catalog body");
+        let catalog_json: serde_json::Value =
+            serde_json::from_slice(&catalog_body).expect("catalog JSON");
+        assert_eq!(
+            catalog_json["ecosystems"][0]["tracks"][0]["runner_status"],
+            "review-required"
+        );
+        assert_eq!(
+            catalog_json["ecosystems"][0]["tracks"][0]["runner_version"],
+            runner::RUNNER_VERSION
+        );
 
         let curriculum = app
             .clone()
@@ -5192,6 +5293,10 @@ mod tests {
         let curriculum_json: serde_json::Value =
             serde_json::from_slice(&curriculum_body).expect("curriculum JSON");
         assert_eq!(curriculum_json["lessons"].as_array().map(Vec::len), Some(5));
+        assert_eq!(
+            curriculum_json["runner_manifest_version"],
+            runner::RUNNER_MANIFEST_VERSION
+        );
         let curriculum_text =
             String::from_utf8(curriculum_body.to_vec()).expect("curriculum UTF-8");
         assert!(!curriculum_text.contains("correct_option_id"));
@@ -5241,6 +5346,45 @@ mod tests {
             .await
             .expect("legacy response");
         assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn authenticated_submissions_fail_closed_pending_runner_review() {
+        let (verifier, assertion, _) = router_test_assertion();
+        let app = build_router(router_test_state(verifier));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "scenario_id": runner::RUNNER_SCENARIO_ID,
+            "scenario_manifest_version": runner::runner_manifest().scenario_manifest_version,
+            "source": runner::SOLUTION_SOURCE
+        }))
+        .expect("submission JSON");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v3/submissions")
+                    .header(header::AUTHORIZATION, format!("Bearer {assertion}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("submission request"),
+            )
+            .await
+            .expect("submission response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let response_body = to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("runner error body");
+        let response_json: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("runner error JSON");
+        assert_eq!(response_json["code"], "runner-review-required");
     }
 
     fn ai_impl_fixture() -> String {
@@ -5424,6 +5568,7 @@ mod tests {
     fn missing_integrations_include_ckb_and_fiber() {
         let state = AppState {
             auth: AuthVerifier::disabled(),
+            runner: runner::RunnerService::disabled(),
             config: AppConfig {
                 port: 8080,
                 app_env: "test".to_string(),

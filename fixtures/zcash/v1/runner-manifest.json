@@ -1,0 +1,71 @@
+{
+  "runner_manifest_version": "shielded-checkout-runner-1.0.0",
+  "runner_version": "vibequest-runner-1.0.0",
+  "protocol_version": "vibequest-runner-protocol-1.0.0",
+  "scenario_manifest_version": "shielded-checkout-scenarios-1.0.0",
+  "scenario_id": "shielded-checkout",
+  "language": "typescript",
+  "production_enabled": false,
+  "toolchain": {
+    "image": "node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2",
+    "runtime": "node",
+    "runtime_version": "22.23.1",
+    "dependency_allowlist": []
+  },
+  "source": {
+    "path": "starter/src/checkout.ts",
+    "max_bytes": 65536,
+    "starter_sha256": "a0a12436805c7dfe1c5d8ca1c4cb64ab9267ce555e5ef50937ae1bd2881c2139"
+  },
+  "tests": {
+    "harness_path": "runner/harness.mjs",
+    "harness_sha256": "578b5b39ef3758124f3213ebc89f26db44bf07ba23e87d8dd0a3a7028b0faf2c",
+    "public_path": "runner/public-tests.mjs",
+    "public_sha256": "0d884564779edf60d79d9b63413062e5f15f3ca0df4242279067395e02718e7a",
+    "hidden_path": "runner/hidden-tests.mjs",
+    "hidden_sha256": "053fdb591426f4568a84742fc2f4e8861dd39f2ba3955f8997462be39e736e65",
+    "bundle_sha256": "2ab3279d866110dc323f5e55596b3927470d43ac90140d4df1aaf3464a7ed5fb",
+    "public_case_count": 15,
+    "hidden_case_count": 5
+  },
+  "scenario_package_sha256": "3599331404ac1be8951135e8cb076c457db806d974841c95a491fb3528fda5cc",
+  "limits": {
+    "queue_capacity": 32,
+    "max_concurrency": 1,
+    "max_retries": 1,
+    "wall_clock_ms": 8000,
+    "vm_module_ms": 1000,
+    "cpu_cores": 0.5,
+    "memory_bytes": 134217728,
+    "pids": 32,
+    "max_output_bytes": 65536,
+    "max_public_output_bytes": 8192,
+    "tmpfs_bytes": 16777216,
+    "open_files": 64
+  },
+  "isolation": {
+    "backend": "docker",
+    "network": "none",
+    "root_filesystem": "read-only",
+    "job_mount": "read-only",
+    "tmpfs": "noexec,nosuid,nodev",
+    "uid": 65534,
+    "gid": 65534,
+    "capabilities": "drop-all",
+    "no_new_privileges": true,
+    "ipc": "none",
+    "docker_socket_mounted": false,
+    "host_environment_forwarded": false,
+    "node_permission_model": true,
+    "learner_vm": {
+      "process": false,
+      "filesystem": false,
+      "network": false,
+      "console": false,
+      "static_imports": false,
+      "dynamic_imports": false,
+      "string_code_generation": false,
+      "wasm_code_generation": false
+    }
+  }
+}

@@ -4,7 +4,7 @@ This package is the single codebase used by all five lessons in the Zcash shield
 
 ## Trust Boundary
 
-The TypeScript scenario consumes structured reports and summaries produced by the reviewed Rust domain engine. Browser-created reports are untrusted. Chunk 05 will execute learner edits in an isolated runner and bind the resulting evidence to this scenario version.
+The TypeScript scenario consumes structured reports and summaries produced by the reviewed Rust domain engine. Browser-created reports are untrusted. The isolated runner executes learner edits against pinned public and hidden tests and binds signed evidence to this scenario version. Production execution remains gated pending external queue review.
 
 The starter contains exactly five defects:
 
