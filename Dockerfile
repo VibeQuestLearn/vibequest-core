@@ -7,6 +7,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
+COPY fixtures ./fixtures
+COPY scenarios ./scenarios
 COPY src ./src
 
 RUN cargo build --release
