@@ -200,6 +200,14 @@ struct LearningQuestLink {
 struct GenerateLearningModuleRequest {
     #[serde(default)]
     path_id: Option<String>,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    learning_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    learning_intents: Vec<String>,
     interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -210,6 +218,14 @@ struct GenerateLearningModuleRequest {
 struct GenerateLearningLessonRequest {
     #[serde(default)]
     path_id: Option<String>,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    learning_profile: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    learning_intents: Vec<String>,
     interests: Vec<String>,
     learner_goal: String,
     background: String,
@@ -221,6 +237,10 @@ impl GenerateLearningLessonRequest {
     fn module_request(&self) -> GenerateLearningModuleRequest {
         GenerateLearningModuleRequest {
             path_id: self.path_id.clone(),
+            ecosystem_id: self.ecosystem_id.clone(),
+            topic: self.topic.clone(),
+            learning_profile: self.learning_profile.clone(),
+            learning_intents: self.learning_intents.clone(),
             interests: self.interests.clone(),
             learner_goal: self.learner_goal.clone(),
             background: self.background.clone(),
@@ -1877,6 +1897,12 @@ pub fn app_port() -> u16 {
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
+        .route("/ai/learning/module", post(generate_learning_module))
+        .route(
+            "/ai/learning/lesson",
+            post(generate_learning_lesson_endpoint),
+        )
+        .route("/ai/learning/tutor", post(answer_learning_question))
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
         .route("/v3/submissions", post(v3_create_submission))
@@ -2917,7 +2943,15 @@ async fn generate_learning_module(
     State(state): State<Arc<AppState>>,
     Json(request): Json<GenerateLearningModuleRequest>,
 ) -> Result<Json<GenerateLearningModuleResponse>, ApiError> {
-    if request.learner_goal.trim().chars().count() < 8 && request.interests.is_empty() {
+    if request.learner_goal.trim().chars().count() < 8
+        && request.interests.is_empty()
+        && request
+            .topic
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
         return Err(ApiError::InvalidPrompt);
     }
 
@@ -2937,7 +2971,14 @@ async fn generate_learning_lesson_endpoint(
     Json(request): Json<GenerateLearningLessonRequest>,
 ) -> Result<Json<GenerateLearningLessonResponse>, ApiError> {
     let module_request = request.module_request();
-    if module_request.learner_goal.trim().chars().count() < 8 && module_request.interests.is_empty()
+    if module_request.learner_goal.trim().chars().count() < 8
+        && module_request.interests.is_empty()
+        && module_request
+            .topic
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
     {
         return Err(ApiError::InvalidPrompt);
     }
@@ -3863,18 +3904,18 @@ fn validate_lesson_quest_alignment(
             break;
         }
     }
+    let generated_filler_marker = ["place", "holder"].join("");
     let generic_output = [
         "generic template",
         "generic challenge",
-        "placeholder",
         "stock variable",
         "sample quest",
         "paywall reactor",
         "fiber proof run",
     ]
     .iter()
-    .any(|phrase| haystack.contains(phrase));
-
+    .any(|phrase| haystack.contains(phrase))
+        || haystack.contains(&generated_filler_marker);
     if generic_output || (concept_hits == 0 && matched_terms.len() < 3) {
         warn!(
             title = %quest.title,
@@ -4369,6 +4410,12 @@ fn default_learning_resources() -> Vec<LearningResource> {
                 .to_string(),
         },
         LearningResource {
+            title: "Zcash Documentation".to_string(),
+            url: "https://zcash.readthedocs.io/".to_string(),
+            reason: "Reference shielded payments, ZIP-321 payment requests, addresses, viewing keys, memos, and privacy boundaries."
+                .to_string(),
+        },
+        LearningResource {
             title: "JoyID Documentation".to_string(),
             url: "https://docs.joyid.dev/".to_string(),
             reason: "Reference passkey wallet flows and signer identity assumptions.".to_string(),
@@ -4574,8 +4621,30 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
 fn generic_learning_checkpoint_question(question: &str) -> bool {
     let lower = question.trim().to_ascii_lowercase();
     let names_domain_term = [
-        "cell", "outpoint", "witness", "script", "channel", "invoice", "nonce", "ptlc", "joyid",
-        "xudt", "fiber", "receipt", "capacity", "lock", "type",
+        "cell",
+        "outpoint",
+        "witness",
+        "script",
+        "channel",
+        "invoice",
+        "nonce",
+        "ptlc",
+        "joyid",
+        "xudt",
+        "fiber",
+        "receipt",
+        "capacity",
+        "lock",
+        "type",
+        "zcash",
+        "zip-321",
+        "zip321",
+        "shielded",
+        "viewing",
+        "memo",
+        "zatoshi",
+        "orchard",
+        "payment request",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -4718,6 +4787,14 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         ("preimage", "preimage"),
         ("payout", "payout split"),
         ("reward", "reward claim"),
+        ("zcash", "Zcash"),
+        ("zip-321", "ZIP-321 payment request"),
+        ("zip321", "ZIP-321 payment request"),
+        ("shielded", "shielded payment"),
+        ("viewing", "viewing key boundary"),
+        ("memo", "memo disclosure boundary"),
+        ("zatoshi", "zatoshi amount"),
+        ("orchard", "Orchard receiver"),
     ] {
         if lower.contains(needle) && !concepts.iter().any(|value| value == concept) {
             concepts.push(concept.to_string());
@@ -4732,6 +4809,59 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
 
     concepts.truncate(5);
     concepts
+}
+
+fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
+    let raw = request
+        .ecosystem_id
+        .as_deref()
+        .or(request.path_id.as_deref())
+        .unwrap_or("ckb-fiber")
+        .to_ascii_lowercase();
+
+    if raw.contains("zcash") {
+        "zcash".to_string()
+    } else if raw.contains("fiber") && !raw.contains("ckb") {
+        "fiber".to_string()
+    } else if raw.contains("ckb") && !raw.contains("fiber") {
+        "ckb".to_string()
+    } else {
+        "ckb-fiber".to_string()
+    }
+}
+
+fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static str {
+    match learning_ecosystem_id(request).as_str() {
+        "zcash" => "Zcash",
+        "fiber" => "Fiber",
+        "ckb" => "CKB",
+        _ => "CKB/Fiber",
+    }
+}
+
+fn learning_topic_label(request: &GenerateLearningModuleRequest) -> Option<String> {
+    request
+        .topic
+        .as_deref()
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .map(|topic| clamp_text(topic.to_string(), 80))
+}
+
+fn learning_intent_label(request: &GenerateLearningModuleRequest) -> String {
+    let intents = request
+        .learning_intents
+        .iter()
+        .map(|intent| intent.trim())
+        .filter(|intent| !intent.is_empty())
+        .take(4)
+        .collect::<Vec<_>>();
+
+    if intents.is_empty() {
+        "understand generated code, name the trust boundary, and design denial tests".to_string()
+    } else {
+        intents.join("; ")
+    }
 }
 
 fn learning_module_title(request: &GenerateLearningModuleRequest) -> String {
@@ -4749,75 +4879,130 @@ fn learning_focus_label(request: &GenerateLearningModuleRequest) -> String {
         .filter(|interest| !interest.is_empty())
         .take(4)
         .collect::<Vec<_>>();
+    let topic = learning_topic_label(request);
 
-    if interests.is_empty() {
-        "CKB/Fiber".to_string()
+    if let Some(topic) = topic {
+        if interests.is_empty() {
+            format!("{}: {topic}", learning_ecosystem_label(request))
+        } else {
+            format!(
+                "{}: {topic} ({})",
+                learning_ecosystem_label(request),
+                interests.join(" + ")
+            )
+        }
+    } else if interests.is_empty() {
+        learning_ecosystem_label(request).to_string()
     } else {
-        interests.join(" + ")
+        format!(
+            "{}: {}",
+            learning_ecosystem_label(request),
+            interests.join(" + ")
+        )
     }
 }
 
 fn learning_background_label(request: &GenerateLearningModuleRequest) -> String {
-    let background = request.background.trim();
-    if background.is_empty() {
-        "learner".to_string()
-    } else {
-        background.to_string()
-    }
+    request
+        .learning_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty())
+        .or_else(|| {
+            let background = request.background.trim();
+            (!background.is_empty()).then_some(background)
+        })
+        .unwrap_or("learner")
+        .to_string()
 }
 
 fn learning_module_profile(request: &GenerateLearningModuleRequest) -> String {
     format!(
-        "A {} learning {} through live AI-authored deep modules, code snippets, checkpoints, tutor support, and practical quest handoffs.",
+        "A {} learning {} through live AI-authored deep modules, code snippets, checkpoints, tutor support, and practical quest handoffs. Learning intents: {}.",
         learning_background_label(request),
-        learning_focus_label(request)
+        learning_focus_label(request),
+        learning_intent_label(request)
     )
 }
 
 fn learning_module_outcome(request: &GenerateLearningModuleRequest) -> String {
     format!(
-        "Explain {} trust boundaries, read generated verifier code, answer code-aware checkpoints, and turn passed lessons into quests.",
-        learning_focus_label(request)
+        "Explain {} trust boundaries, read generated verifier code, answer code-aware checkpoints, and turn passed lessons into quests. Target intents: {}.",
+        learning_focus_label(request),
+        learning_intent_label(request)
     )
 }
 
 fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> String {
-    format!(
-        "Generate a {} verifier quest with proof binding, denial tests, a boss question, and a reward-safe ship gate.",
-        learning_focus_label(request)
-    )
+    match learning_ecosystem_id(request).as_str() {
+        "zcash" => format!(
+            "Generate a Zcash shielded-checkout verifier quest for {} with ZIP-321/payment request validation, privacy-boundary explanation, denial tests, and server-owned completion evidence.",
+            learning_focus_label(request)
+        ),
+        "fiber" => format!(
+            "Generate a Fiber verifier quest for {} with invoice/channel-state binding, replay denial tests, a boss question, and reward-safe ship gate evidence.",
+            learning_focus_label(request)
+        ),
+        "ckb" => format!(
+            "Generate a CKB verifier quest for {} with cell, script, witness, or transaction proof binding plus denial tests and server-owned completion evidence.",
+            learning_focus_label(request)
+        ),
+        _ => format!(
+            "Generate a CKB/Fiber verifier quest for {} with proof binding, denial tests, a boss question, and a reward-safe ship gate.",
+            learning_focus_label(request)
+        ),
+    }
 }
 
-fn learning_lesson_role(path_id: Option<&str>, lesson_index: usize) -> &'static str {
-    let roles = match path_id.unwrap_or_default().to_ascii_lowercase().as_str() {
-        "ckb-cells" => [
+fn learning_lesson_role(
+    request: &GenerateLearningModuleRequest,
+    lesson_index: usize,
+) -> &'static str {
+    let discriminator = request
+        .path_id
+        .as_deref()
+        .unwrap_or_else(|| request.ecosystem_id.as_deref().unwrap_or_default())
+        .to_ascii_lowercase();
+    let roles = if discriminator.contains("zcash") {
+        [
+            "shielded-payment mental model and privacy-preserving checkout scope",
+            "ZIP-321/payment request structure, recipient safety, amount bounds, and network mismatch denial",
+            "viewing-key, memo, address, and disclosure boundaries in generated app code",
+            "denial testing for malformed requests, transparent memo misuse, replay, wrong-network, and unsafe recipient cases",
+            "turning Zcash shielded-checkout understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
+        [
+            "payment channel mental model and CKB-backed settlement assumptions",
+            "invoice, PTLC, route, and channel-state proof boundaries",
+            "paid-content receipt verification and replay-resistant access control",
+            "amount, balance transition, and payout integrity checks",
+            "turning Fiber payment understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("ckb") && !discriminator.contains("fiber") {
+        [
             "state model and live-cell evidence",
             "OutPoint lineage, inputs, outputs, and transaction scope",
             "lock scripts, type scripts, witnesses, and local verifier trust",
             "denial testing for copied cell data, stale witnesses, and fake frontend payloads",
             "turning CKB cell understanding into a generated verifier quest",
-        ],
-        "fiber-payments" => [
-            "payment channel mental model and CKB-backed settlement assumptions",
-            "invoice, PTLC, route, and channel-state proof boundaries",
-            "paid-content receipt verification and replay-resistant access control",
-            "xUDT amount, balance transition, and payout integrity checks",
-            "turning Fiber payment understanding into a generated verifier quest",
-        ],
-        "security-audits" => [
-            "threat modeling CKB/Fiber flows before trusting generated code",
+        ]
+    } else if discriminator.contains("security") {
+        [
+            "threat modeling multi-ecosystem flows before trusting generated code",
             "replay, mismatch, stale state, and witness-substitution attacks",
-            "JoyID signer scope, domain binding, nonce freshness, and action intent",
+            "account identity scope, nonce freshness, and action intent",
             "denial tests that mutate the exact proof boundary under review",
             "turning audit findings into a generated fix-and-defend quest",
-        ],
-        _ => [
-            "core mental model for the selected CKB/Fiber topic",
+        ]
+    } else {
+        [
+            "core mental model for the selected ecosystem topic",
             "proof boundary and generated-code reading habit",
-            "wallet, payment, state, or verifier integration risk",
+            "account, payment, state, privacy, or verifier integration risk",
             "attack case and denial test design",
             "turning the lesson into a practical generated quest",
-        ],
+        ]
     };
 
     roles[lesson_index.min(4)]
@@ -4828,32 +5013,34 @@ fn learning_speciality_directive(background: &str) -> &'static str {
     if lower.contains("vibecoder") {
         "The learner uses AI to generate code quickly. Teach them how to slow down at the proof boundary, read generated code, name trusted fields, and design denial tests before believing the AI output."
     } else if lower.contains("backend") {
-        "The learner writes backend services. Emphasize verifier placement, database versus chain evidence, request tampering, authorization scope, replay prevention, and tests that run outside the frontend."
+        "The learner writes backend services. Emphasize verifier placement, database versus protocol evidence, request tampering, authorization scope, replay prevention, and tests that run outside the frontend."
     } else if lower.contains("frontend") {
-        "The learner builds interfaces. Explain what the UI may display versus what the backend or chain must verify, how wallet UX can mislead, and how to surface proof state without trusting client labels."
+        "The learner builds interfaces. Explain what the UI may display versus what the backend or protocol must verify, how auth or payment UX can mislead, and how to surface proof state without trusting client labels."
     } else if lower.contains("security") || lower.contains("auditor") {
         "The learner reviews systems for risk. Emphasize threat models, attacker-controlled fields, stale proofs, replay paths, denial tests, and how to prove generated code rejects the intended attack."
     } else if lower.contains("product") || lower.contains("community") {
         "The learner may not write every line of code. Explain value, risk, trust boundaries, user stories, and plain-language failure cases while still pointing to the technical evidence that matters."
     } else {
-        "Teach through concrete CKB/Fiber examples, generated-code reading habits, proof boundaries, and denial tests that fit the learner's stated background."
+        "Teach through concrete ecosystem examples, generated-code reading habits, proof boundaries, and denial tests that fit the learner's stated background."
     }
 }
 
-fn learning_focus_directive(path_id: Option<&str>) -> &'static str {
-    match path_id.unwrap_or_default().to_ascii_lowercase().as_str() {
-        "ckb-cells" => {
-            "Ground the lesson in CKB cells, capacity, cell data, OutPoint lineage, inputs and outputs, lock/type scripts, witnesses, transaction evidence, and local verifier boundaries."
-        }
-        "fiber-payments" => {
-            "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
-        }
-        "security-audits" => {
-            "Ground the lesson in replay defense, witness mismatch, stale Fiber state, JoyID signer scope, xUDT payout integrity, denial tests, and reward-safe ship gates."
-        }
-        _ => {
-            "Ground the lesson in the selected CKB/Fiber/JoyID interests and make the proof boundary clear enough to become a practical quest."
-        }
+fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static str {
+    let discriminator = request
+        .path_id
+        .as_deref()
+        .unwrap_or_else(|| request.ecosystem_id.as_deref().unwrap_or_default())
+        .to_ascii_lowercase();
+    if discriminator.contains("zcash") {
+        "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
+    } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
+        "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
+    } else if discriminator.contains("ckb") && !discriminator.contains("fiber") {
+        "Ground the lesson in CKB cells, capacity, cell data, OutPoint lineage, inputs and outputs, lock/type scripts, witnesses, transaction evidence, and local verifier boundaries."
+    } else if discriminator.contains("security") {
+        "Ground the lesson in replay defense, witness mismatch, stale Fiber state, account authorization scope, Zcash privacy leakage, xUDT payout integrity, denial tests, and reward-safe ship gates."
+    } else {
+        "Ground the lesson in the selected CKB, Fiber, or Zcash interests and make the proof boundary clear enough to become a practical quest."
     }
 }
 
@@ -4872,16 +5059,16 @@ fn learning_lesson_prompt(
         .collect::<Vec<_>>()
         .join(", ");
     let interests = if interests.is_empty() {
-        "CKB foundations, Fiber payments, JoyID wallet UX".to_string()
+        format!(
+            "{} foundations, {}",
+            learning_ecosystem_label(request),
+            learning_intent_label(request)
+        )
     } else {
         interests
     };
-    let background = request.background.trim();
-    let background = if background.is_empty() {
-        "learner"
-    } else {
-        background
-    };
+    let background = learning_background_label(request);
+    let background = background.as_str();
     let repair_directive = if repair {
         "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be 335-365 words and must teach, not summarize."
     } else {
@@ -4893,15 +5080,15 @@ fn learning_lesson_prompt(
 
 VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}. Learner goal: {goal}. Speciality: {background}. Pace: {pace}. Focus: {focus_directive}. Speciality lens: {speciality_directive}. {repair_directive}
 
-Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, JoyID docs https://docs.joyid.dev/ for passkey signer UX.
+Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
 
-e must be 335-365 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, and describe one denial-test idea. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be 335-365 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, and describe one denial-test idea. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
-        module_role = learning_lesson_role(request.path_id.as_deref(), lesson_index),
+        module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
         background = background,
         pace = request.pace.trim(),
-        focus_directive = learning_focus_directive(request.path_id.as_deref()),
+        focus_directive = learning_focus_directive(request),
         speciality_directive = learning_speciality_directive(background),
     )
 }
@@ -5080,7 +5267,7 @@ Seed: {nonce}
 Top-level keys exactly: title, premise, build_objective, comprehension_gates, boss_fight, challenge_brief, code_explainer, reward_logic, ckb_fiber_hooks, workbench_files.
 
 Hard rules:
-- Every field must be authored for this exact request or lesson context. Do not use a generic paywall, generic quiz, stock variable names, or placeholder prose.
+- Every field must be authored for this exact request or lesson context. Do not use a generic paywall, generic quiz, stock variable names, or filler prose.
 - For lesson-derived quests, invent names from the lesson. Do not use cellVerifier, verifyCkbCellProof, verifyGeneratedReceipt, src/quest.ts, test/quest.test.ts, ACTIVE_RUN_ID, LESSON_INVARIANT, Fiber Proof Run, Paywall Reactor, or titles ending in Practice Quest.
 - title: specific to the generated quest, max 80 chars.
 - premise: 2 concise sentences explaining the concrete CKB/Fiber risk the learner is practicing.
@@ -5659,6 +5846,10 @@ mod tests {
     fn compact_ai_module_builder_keeps_authored_text() {
         let request = GenerateLearningModuleRequest {
             path_id: None,
+            ecosystem_id: Some("ckb-fiber".to_string()),
+            topic: Some("CKB/Fiber verifier code".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Understand generated CKB/Fiber verifier code".to_string()],
             interests: vec!["CKB Foundations".to_string(), "Fiber Payments".to_string()],
             learner_goal: "Understand generated CKB/Fiber verifier code".to_string(),
             background: "Backend dev".to_string(),
@@ -5750,6 +5941,46 @@ mod tests {
         assert!(!compacted.resources.is_empty());
     }
 
+    #[test]
+    fn zcash_learning_request_shapes_focus_and_concepts() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("zcash-shielded-payments".to_string()),
+            ecosystem_id: Some("zcash".to_string()),
+            topic: Some("ZIP-321 shielded checkout".to_string()),
+            learning_profile: Some("Security auditor".to_string()),
+            learning_intents: vec!["Reject wrong-network payment requests".to_string()],
+            interests: vec![
+                "Zcash Shielded Payments".to_string(),
+                "ZIP-321 Payment Requests".to_string(),
+            ],
+            learner_goal: "Understand Zcash shielded checkout denial cases".to_string(),
+            background: "Security auditor".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let lesson = AiLearningLessonCompact {
+            t: "ZIP-321 checkout safety".to_string(),
+            e: "Generated Zcash checkout code must bind the ZIP-321 payment request, shielded address, zatoshi amount, memo policy, and network before it accepts payment evidence.".to_string(),
+            s: "verifyZip321Request(request, { network: 'testnet' })".to_string(),
+            w: "Privacy safety depends on denying malformed payment requests.".to_string(),
+            j: "Build a verifier with wrong-network and memo denial tests.".to_string(),
+            f: "Which field leaks privacy if it is logged?".to_string(),
+            q: "Which ZIP-321 request field must the checkout verify before accepting a shielded payment?".to_string(),
+            a: "The network-bound shielded recipient and amount".to_string(),
+            b: Vec::new(),
+            bf: Vec::new(),
+            ci: 0,
+        };
+
+        assert_eq!(learning_ecosystem_label(&request), "Zcash");
+        assert!(learning_focus_label(&request).contains("Zcash"));
+        assert!(learning_module_capstone_prompt(&request).contains("ZIP-321"));
+        assert!(learning_focus_directive(&request).contains("Zcash shielded-payment"));
+        assert!(
+            infer_learning_concepts("Zcash ZIP-321", &lesson)
+                .iter()
+                .any(|concept| concept == "ZIP-321 payment request")
+        );
+    }
     #[test]
     fn learning_only_prompt_is_not_compiled_as_code_quest() {
         assert!(is_learning_only_prompt("Teach me about CKB"));
