@@ -53,7 +53,7 @@ const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 90;
 const QUICK_QUEST_OUTPUT_TOKENS: u16 = 5200;
-const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 1550;
+const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 2600;
 const TUTOR_OUTPUT_TOKENS: u16 = 780;
 
 #[derive(Clone)]
@@ -288,8 +288,21 @@ struct LearningLesson {
     why_it_matters: String,
     explanation: String,
     concepts: Vec<String>,
+    #[serde(default)]
+    submodules: Vec<LearningSubmodule>,
+    #[serde(default)]
+    resources: Vec<LearningResource>,
     checkpoint: LearningCheckpoint,
     quest_bridge: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LearningSubmodule {
+    id: String,
+    title: String,
+    summary: String,
+    #[serde(default)]
+    children: Vec<LearningSubmodule>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -477,6 +490,12 @@ struct SaveLearningSessionRequest {
 #[derive(Debug, Serialize)]
 struct LearningSessionResponse {
     session: Option<LearningSessionRecord>,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningSessionsResponse {
+    sessions: Vec<LearningSessionRecord>,
     persistence: PersistenceStatus,
 }
 
@@ -1338,9 +1357,37 @@ impl MongoStore {
             .learning_sessions()
             .await?
             .find_one(doc! { "user_id": user_id })
+            .sort(doc! { "updated_at": -1 })
             .await?;
 
         Ok(document.map(LearningSessionRecord::from))
+    }
+
+    async fn list_learning_sessions(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<LearningSessionRecord>, ApiError> {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Ok(Vec::new());
+        }
+
+        let mut cursor = self
+            .learning_sessions()
+            .await?
+            .find(doc! { "user_id": user_id })
+            .sort(doc! { "updated_at": -1 })
+            .limit(50)
+            .await?;
+        let mut sessions = Vec::new();
+        while let Some(session) = cursor.try_next().await? {
+            sessions.push(LearningSessionRecord::from(session));
+        }
+
+        Ok(sessions)
     }
 
     async fn save_learning_session(
@@ -1359,13 +1406,15 @@ impl MongoStore {
 
         let module = compact_learning_module(request.module)?;
         let sessions = self.learning_sessions().await?;
-        let existing = sessions.find_one(doc! { "user_id": user_id }).await?;
         let now = BsonDateTime::now();
         let id = request
             .module_id
+            .map(|module_id| clamp_text(module_id, 120))
             .filter(|module_id| !module_id.trim().is_empty())
-            .or_else(|| existing.as_ref().map(|session| session.id.clone()))
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let existing = sessions
+            .find_one(doc! { "_id": &id, "user_id": user_id })
+            .await?;
         let created_at = existing
             .as_ref()
             .map(|session| session.created_at)
@@ -1397,7 +1446,7 @@ impl MongoStore {
         };
 
         sessions
-            .replace_one(doc! { "user_id": user_id }, &document)
+            .replace_one(doc! { "_id": &id, "user_id": user_id }, &document)
             .upsert(true)
             .await?;
 
@@ -2017,6 +2066,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/ai/learning/session",
             get(api_get_learning_session).post(api_save_learning_session),
         )
+        .route("/ai/learning/sessions", get(api_list_learning_sessions))
         .route("/ai/learning/quest", post(generate_learning_quest))
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
@@ -3265,6 +3315,48 @@ async fn api_get_learning_session(
         }
         Err(_) => Ok(Json(LearningSessionResponse {
             session: None,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_list_learning_sessions(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearningSessionsResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.list_learning_sessions(&principal.user_id),
+    )
+    .await
+    {
+        Ok(Ok(sessions)) => Ok(Json(LearningSessionsResponse {
+            persistence: PersistenceStatus {
+                saved: state.store.is_configured(),
+                warning: if state.store.is_configured() {
+                    None
+                } else {
+                    Some(learning_persistence_degraded_warning())
+                },
+            },
+            sessions,
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session list is degraded");
+            Ok(Json(LearningSessionsResponse {
+                sessions: Vec::new(),
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningSessionsResponse {
+            sessions: Vec::new(),
             persistence: PersistenceStatus {
                 saved: false,
                 warning: Some(learning_persistence_degraded_warning()),
@@ -4701,7 +4793,7 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
         module.lessons.truncate(5);
     }
 
-    if module.lessons.len() < 5 {
+    if module.lessons.is_empty() {
         return Err(ApiError::InvalidAiResponse);
     }
 
@@ -4711,7 +4803,7 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
         }
         lesson.title = clamp_text(lesson.title.clone(), 80);
         lesson.why_it_matters = clamp_text(lesson.why_it_matters.clone(), 620);
-        lesson.explanation = clamp_text(lesson.explanation.clone(), 3200);
+        lesson.explanation = clamp_text(lesson.explanation.clone(), 7000);
         lesson.quest_bridge = clamp_text(lesson.quest_bridge.clone(), 280);
         if lesson.concepts.len() > 5 {
             lesson.concepts.truncate(5);
@@ -4723,8 +4815,11 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
             .filter(|concept| !concept.trim().is_empty())
             .collect();
         if lesson.concepts.is_empty() {
-            lesson.concepts.push("CKB/Fiber trust boundary".to_string());
+            lesson.concepts.push("protocol trust boundary".to_string());
         }
+        lesson.submodules =
+            compact_learning_submodules(std::mem::take(&mut lesson.submodules), &lesson.concepts);
+        lesson.resources = compact_learning_resources(std::mem::take(&mut lesson.resources));
 
         if lesson.checkpoint.options.len() > 4 {
             lesson.checkpoint.options.truncate(4);
@@ -4764,6 +4859,63 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
     Ok(module)
 }
 
+fn compact_learning_submodules(
+    submodules: Vec<LearningSubmodule>,
+    concepts: &[String],
+) -> Vec<LearningSubmodule> {
+    let mut compacted = submodules
+        .into_iter()
+        .filter(|submodule| !submodule.title.trim().is_empty())
+        .take(5)
+        .enumerate()
+        .map(|(index, submodule)| LearningSubmodule {
+            id: if submodule.id.trim().is_empty() {
+                format!("submodule-{}", index + 1)
+            } else {
+                clamp_text(submodule.id, 80)
+            },
+            title: clamp_text(submodule.title, 90),
+            summary: clamp_text(submodule.summary, 260),
+            children: submodule
+                .children
+                .into_iter()
+                .filter(|child| !child.title.trim().is_empty())
+                .take(3)
+                .enumerate()
+                .map(|(child_index, child)| LearningSubmodule {
+                    id: if child.id.trim().is_empty() {
+                        format!("submodule-{}-{}", index + 1, child_index + 1)
+                    } else {
+                        clamp_text(child.id, 80)
+                    },
+                    title: clamp_text(child.title, 90),
+                    summary: clamp_text(child.summary, 220),
+                    children: Vec::new(),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    if compacted.is_empty() {
+        compacted = concepts
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(index, concept)| LearningSubmodule {
+                id: format!("submodule-{}", index + 1),
+                title: clamp_text(concept.clone(), 90),
+                summary: format!(
+                    "Read this as a focused submodule: define {}, identify the trusted evidence, then design one denial case that proves generated code cannot fake it.",
+                    concept
+                ),
+                children: Vec::new(),
+            })
+            .collect();
+    }
+
+    compacted
+}
+
 fn compact_learning_resources(resources: Vec<LearningResource>) -> Vec<LearningResource> {
     let mut compacted = resources
         .into_iter()
@@ -4773,7 +4925,7 @@ fn compact_learning_resources(resources: Vec<LearningResource>) -> Vec<LearningR
             url: clamp_text(resource.url, 160),
             reason: clamp_text(resource.reason, 180),
         })
-        .take(4)
+        .take(5)
         .collect::<Vec<_>>();
 
     if compacted.is_empty() {
@@ -4893,13 +5045,18 @@ fn default_learning_resources() -> Vec<LearningResource> {
         LearningResource {
             title: "Zcash Documentation".to_string(),
             url: "https://zcash.readthedocs.io/".to_string(),
-            reason: "Reference shielded payments, ZIP-321 payment requests, addresses, viewing keys, memos, and privacy boundaries."
+            reason: "Reference shielded payments, payment requests, addresses, viewing keys, memos, and privacy boundaries."
                 .to_string(),
         },
         LearningResource {
-            title: "JoyID Documentation".to_string(),
-            url: "https://docs.joyid.dev/".to_string(),
-            reason: "Reference passkey wallet flows and signer identity assumptions.".to_string(),
+            title: "ZIP-321 Payment Request Standard".to_string(),
+            url: "https://zips.z.cash/zip-0321".to_string(),
+            reason: "Reference payment request URI structure, recipient fields, amounts, memos, and interoperability constraints.".to_string(),
+        },
+        LearningResource {
+            title: "MDN Web Docs".to_string(),
+            url: "https://developer.mozilla.org/".to_string(),
+            reason: "Reference web platform basics such as HTTP, APIs, browser state, security, and frontend/backend boundaries.".to_string(),
         },
     ]
 }
@@ -5020,7 +5177,7 @@ fn build_learning_module_from_compact_ai(
     request: &GenerateLearningModuleRequest,
     compact: AiLearningModuleCompact,
 ) -> Result<LearningModule, ApiError> {
-    if compact.l.len() < 5 {
+    if compact.l.is_empty() {
         return Err(ApiError::InvalidAiResponse);
     }
 
@@ -5082,7 +5239,7 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
     let bridge_words = lesson.j.split_whitespace().count();
 
     if lesson.t.trim().is_empty()
-        || explainer_words < 300
+        || explainer_words < 500
         || lesson.s.trim().is_empty()
         || why_words < 35
         || bridge_words < 22
@@ -5178,6 +5335,8 @@ fn compact_ai_lesson_to_learning_lesson(
         why_it_matters,
         explanation: expanded_learning_explanation(&lesson),
         concepts: concepts.clone(),
+        submodules: compact_learning_submodules(Vec::new(), &concepts),
+        resources: default_learning_resources(),
         checkpoint: LearningCheckpoint {
             question,
             options,
@@ -5300,7 +5459,9 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
         .unwrap_or("ckb-fiber")
         .to_ascii_lowercase();
 
-    if raw.contains("zcash") {
+    if raw.contains("basic") || raw.contains("web") || raw.contains("blockchain") {
+        "basics".to_string()
+    } else if raw.contains("zcash") {
         "zcash".to_string()
     } else if raw.contains("fiber") && !raw.contains("ckb") {
         "fiber".to_string()
@@ -5316,6 +5477,7 @@ fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static
         "zcash" => "Zcash",
         "fiber" => "Fiber",
         "ckb" => "CKB",
+        "basics" => "Basics",
         _ => "CKB/Fiber",
     }
 }
@@ -5428,6 +5590,10 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             "Generate a CKB verifier quest for {} with cell, script, witness, or transaction proof binding plus denial tests and server-owned completion evidence.",
             learning_focus_label(request)
         ),
+        "basics" => format!(
+            "Generate a foundations quest for {} with HTTP/API/blockchain transaction reasoning, safe authentication boundaries, denial tests, and server-owned completion evidence.",
+            learning_focus_label(request)
+        ),
         _ => format!(
             "Generate a CKB/Fiber verifier quest for {} with proof binding, denial tests, a boss question, and a reward-safe ship gate.",
             learning_focus_label(request)
@@ -5451,6 +5617,17 @@ fn learning_lesson_role(
             "viewing-key, memo, address, and disclosure boundaries in generated app code",
             "denial testing for malformed requests, transparent memo misuse, replay, wrong-network, and unsafe recipient cases",
             "turning Zcash shielded-checkout understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("basic")
+        || discriminator.contains("web")
+        || discriminator.contains("blockchain")
+    {
+        [
+            "web and blockchain mental model: clients, servers, nodes, wallets, and protocol evidence",
+            "HTTP/API/authentication boundaries and what browser state cannot prove",
+            "transactions, keys, signatures, confirmations, and data-model differences",
+            "denial testing for replay, forged requests, stale state, and unsafe client assumptions",
+            "turning foundations understanding into a generated implementation quest",
         ]
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         [
@@ -5514,6 +5691,11 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         .to_ascii_lowercase();
     if discriminator.contains("zcash") {
         "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
+    } else if discriminator.contains("basic")
+        || discriminator.contains("web")
+        || discriminator.contains("blockchain")
+    {
+        "Ground the lesson in web and blockchain fundamentals: HTTP, APIs, authentication, frontend/backend state, transactions, wallets, keys, signatures, UTXO/account models, nodes, mempools, confirmations, privacy basics, and denial cases for generated apps."
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
     } else if discriminator.contains("ckb") && !discriminator.contains("fiber") {
@@ -5551,7 +5733,7 @@ fn learning_lesson_prompt(
     let background = learning_background_label(request);
     let background = background.as_str();
     let repair_directive = if repair {
-        "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be 335-365 words and must teach, not summarize."
+        "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be at least 520 words and must teach, not summarize."
     } else {
         ""
     };
@@ -5563,7 +5745,7 @@ VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}.
 
 Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
 
-e must be 335-365 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, and describe one denial-test idea. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -5624,7 +5806,7 @@ Rules:
 - code_walkthrough: 3-5 short bullets, each tied to a concrete line/function/field in the generated files.
 - common_misunderstanding: name the likely wrong mental model and correct it.
 - follow_up_question: ask one question that checks whether the learner truly understood this code.
-- references: 2-3 authoritative links with title,url,reason. Prefer CKB Docs, Fiber repo, JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, MDN, or JoyID docs when relevant.
 - Keep answer under 170 words."#,
         title = request.quest_title.trim(),
         objective = request.quest_objective.trim(),
@@ -5652,7 +5834,7 @@ Rules:
 - If the learner asks for a walkthrough, explain: concept gist, how the code lens works, what the checkpoint is testing, the likely vibecoding mistake, and one concrete denial-test habit.
 - If the learner is wrong or vague, correct the misunderstanding using the checkpoint options/feedback and ask a different related follow-up question.
 - Do not answer as a generic CKB/Fiber overview unless the lesson context is missing; connect every outside concept back to this active lesson.
-- references: 2-3 authoritative links with title,url,reason. Prefer CKB Docs, Fiber repo, JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, MDN, or JoyID docs when relevant.
 - Keep answer under 230 words. Keep why_it_matters under 90 words. follow_up_question must be one question tied to this lesson."#,
         module = request.module_title.trim(),
         lesson = request.lesson_title.trim(),
@@ -6336,7 +6518,7 @@ mod tests {
             background: "Backend dev".to_string(),
             pace: "Deep dive".to_string(),
         };
-        let lesson_body = "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace how the wallet address, challenge nonce, domain, action name, CKB cell reference, and Fiber channel request are assembled before signature verification. The important detail is that JoyID makes the signing experience feel simple, but the verifier still has to decide what the user actually approved. A passkey signature proves control of a signer; it does not automatically prove that the same signer approved this run, this route, this invoice, or this generated code path. CKB adds another boundary because cells, scripts, witnesses, and transaction evidence describe state in a way a frontend payload cannot replace. Fiber adds a payment boundary because channel state and invoice proof must be scoped to the content, amount, and settlement expectation. The failure mode is subtle: a vibe-coded route may check that a signature exists while letting the same signed text approve another payout, channel action, or generated quest run. A stronger verifier binds the challenge to the current run, refuses stale nonces, records which proof was consumed, and checks that the CKB or Fiber evidence being trusted is the evidence named in the signed message. The denial test should copy a valid signature into a request with a different run id, CKB cell, Fiber invoice, or action name and prove the backend rejects it before any badge or reward state changes. That test teaches the learner to read generated code by asking what exact proof boundary the code defends, not whether the UI looks authenticated. The practical review habit is to read the generated function from the accepting return statement backward. Every value that makes the function return true should come from either the signed JoyID message, the CKB transaction evidence, or the Fiber payment state. If a value appears only in request JSON, the learner should treat it as attacker-controlled until a denial test proves otherwise.";
+        let lesson_body = "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace how the wallet address, challenge nonce, domain, action name, CKB cell reference, and Fiber channel request are assembled before signature verification. The important detail is that JoyID makes the signing experience feel simple, but the verifier still has to decide what the user actually approved. A passkey signature proves control of a signer; it does not automatically prove that the same signer approved this run, this route, this invoice, or this generated code path. CKB adds another boundary because cells, scripts, witnesses, and transaction evidence describe state in a way a frontend payload cannot replace. Fiber adds a payment boundary because channel state and invoice proof must be scoped to the content, amount, and settlement expectation. The failure mode is subtle: a vibe-coded route may check that a signature exists while letting the same signed text approve another payout, channel action, or generated quest run. A stronger verifier binds the challenge to the current run, refuses stale nonces, records which proof was consumed, and checks that the CKB or Fiber evidence being trusted is the evidence named in the signed message. The denial test should copy a valid signature into a request with a different run id, CKB cell, Fiber invoice, or action name and prove the backend rejects it before any badge or reward state changes. That test teaches the learner to read generated code by asking what exact proof boundary the code defends, not whether the UI looks authenticated. The practical review habit is to read the generated function from the accepting return statement backward. Every value that makes the function return true should come from either the signed JoyID message, the CKB transaction evidence, or the Fiber payment state. If a value appears only in request JSON, the learner should treat it as attacker-controlled until a denial test proves otherwise. The module then extends into a submodule path for implementation review: first inventory every accepted field, then mark whether that field came from a signed challenge, a CKB transaction, a Fiber invoice, or only a database row. The next submodule asks the learner to trace runtime ownership. A verifier that reads user_id from session state still has to prove the signed action, cell, invoice, amount, nonce, and route belong to the same operation. The final submodule turns that map into tests. One valid case should contain the exact signed payload and matching protocol evidence. Three denial cases should mutate the run id, the referenced cell, and the invoice amount. This gives the learner a repeatable audit habit instead of a memorized answer. Further study should connect this exercise to official CKB transaction documentation, Fiber invoice/channel-state behavior, and JoyID challenge signing rules. The learner should finish able to explain why a successful UI callback, a saved database flag, and a copied invoice string are not interchangeable with protocol-bound evidence verified on the server.";
         let compact = AiLearningModuleCompact {
             t: "CKB Fiber JoyID from vibecoded code".to_string(),
             l: (0..5)
@@ -6368,7 +6550,7 @@ mod tests {
                 .explanation
                 .contains("JoyID-signed payload")
         );
-        assert!(module.lessons[0].explanation.split_whitespace().count() >= 300);
+        assert!(module.lessons[0].explanation.split_whitespace().count() >= 500);
         assert!(module.lessons[0].explanation.contains("Code lens:"));
         assert!(
             module.lessons[0]
@@ -6397,6 +6579,8 @@ mod tests {
                     why_it_matters: "Cells are the state a verifier trusts.".to_string(),
                     explanation: "A CKB cell is consumed and recreated, so generated code must bind witnesses to the expected cell state.".to_string(),
                     concepts: vec!["cell".to_string(), "witness".to_string()],
+                    submodules: Vec::new(),
+                    resources: Vec::new(),
                     checkpoint: LearningCheckpoint {
                         question: "What should the verifier bind?".to_string(),
                         options: vec![
