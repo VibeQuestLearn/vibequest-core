@@ -5682,7 +5682,7 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             learning_focus_label(request)
         ),
         "basics" => format!(
-            "Generate a Web3 foundations quest for {} with wallet/signature/transaction reasoning, protocol evidence boundaries, replay or nonce denial tests, and server-owned completion evidence.",
+            "Generate a beginner Web3 foundations quest for {} with plain-language wallet, transaction, block explorer, network safety, and confirmation reasoning plus one practical denial test.",
             learning_focus_label(request)
         ),
         _ => format!(
@@ -5714,11 +5714,11 @@ fn learning_lesson_role(
         || discriminator.contains("blockchain")
     {
         [
-            "Web3 and blockchain mental model: wallets, nodes, signatures, transactions, and protocol evidence",
-            "wallet, key, address, signature-domain, and authorization boundaries",
-            "transactions, mempools, confirmations, finality, reorgs, and data-model differences",
-            "denial testing for replay, forged signatures, stale confirmations, and unsafe client assumptions",
-            "turning Web3 foundations understanding into a generated implementation quest",
+            "absolute beginner mental model: what a blockchain is and why shared history matters",
+            "wallet basics: accounts, addresses, recovery phrases, signing, and what not to share",
+            "transaction basics: sending value, fees, confirmations, explorers, and stuck or failed transactions",
+            "Web3 app basics: connect wallet, approve actions, verify network, and avoid phishing prompts",
+            "turning beginner Web3 understanding into a generated implementation quest",
         ]
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         [
@@ -5786,7 +5786,7 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         || discriminator.contains("web")
         || discriminator.contains("blockchain")
     {
-        "Ground the lesson in Web3 and blockchain fundamentals: wallets, private/public keys, addresses, signatures, signature domains, transactions, UTXO/account models, smart contracts or scripts, nodes, mempools, confirmations, finality, reorg safety, privacy basics, replay resistance, and denial cases for generated Web3 apps."
+        "Ground the lesson in absolute beginner Web3 and blockchain fundamentals: what a blockchain is, blocks, shared history, wallets as user-controlled accounts, addresses, recovery phrases, signing, transaction fees, confirmations, block explorers, wrong networks, phishing prompts, and practical safety habits. Avoid advanced jargon unless you define it first."
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
     } else if discriminator.contains("ckb") && !discriminator.contains("fiber") {
@@ -5823,6 +5823,19 @@ fn learning_lesson_prompt(
     };
     let background = learning_background_label(request);
     let background = background.as_str();
+    let wants_code_snippets = request
+        .learning_intents
+        .iter()
+        .chain(request.interests.iter())
+        .any(|item| {
+            let lower = item.to_ascii_lowercase();
+            lower.contains("code snippet") || lower.contains("interactive code")
+        });
+    let code_snippet_directive = if wants_code_snippets {
+        "The learner selected interactive code samples. s must be a compact but real TypeScript or Rust snippet of 8-24 lines with comments and one safe TODO edit point. The snippet must be directly tied to the lesson."
+    } else {
+        "s is one matching TypeScript/Rust code lens line."
+    };
     let repair_directive = if repair {
         "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be at least 520 words and must teach, not summarize."
     } else {
@@ -5836,7 +5849,7 @@ VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}.
 
 Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, Ethereum developer docs https://ethereum.org/developers/docs/ for Web3 wallet/account/transaction/consensus fundamentals, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, xUDT split, wallet address, signature domain, transaction hash, nonce, node, mempool, or confirmation depth. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, xUDT split, wallet address, signature domain, transaction hash, nonce, node, mempool, or confirmation depth. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -5844,6 +5857,7 @@ e must be at least 520 words of real teaching prose with paragraphs. Define the 
         pace = request.pace.trim(),
         focus_directive = learning_focus_directive(request),
         speciality_directive = learning_speciality_directive(background),
+        code_snippet_directive = code_snippet_directive,
     )
 }
 
