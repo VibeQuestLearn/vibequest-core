@@ -5054,11 +5054,55 @@ fn default_learning_resources() -> Vec<LearningResource> {
             reason: "Reference payment request URI structure, recipient fields, amounts, memos, and interoperability constraints.".to_string(),
         },
         LearningResource {
-            title: "MDN Web Docs".to_string(),
-            url: "https://developer.mozilla.org/".to_string(),
-            reason: "Reference web platform basics such as HTTP, APIs, browser state, security, and frontend/backend boundaries.".to_string(),
+            title: "Ethereum Developer Docs".to_string(),
+            url: "https://ethereum.org/developers/docs/".to_string(),
+            reason: "Reference Web3 wallets, accounts, transactions, smart contracts, nodes, and consensus fundamentals.".to_string(),
         },
     ]
+}
+
+fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
+    let lower = focus.to_ascii_lowercase();
+    let all = default_learning_resources();
+    if lower.contains("zcash") || lower.contains("zip-321") || lower.contains("shielded") {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("zcash") || text.contains("zip-321") || text.contains("zips.z.cash")
+            })
+            .collect();
+    }
+    if lower.contains("fiber") || lower.contains("ptlc") || lower.contains("channel") {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("fiber") || text.contains("nervos")
+            })
+            .collect();
+    }
+    if lower.contains("ckb") || lower.contains("cell") || lower.contains("script") {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("ckb") || text.contains("nervos")
+            })
+            .collect();
+    }
+    if lower.contains("basic") || lower.contains("web3") || lower.contains("blockchain") {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("ethereum") || text.contains("zcash") || text.contains("nervos")
+            })
+            .take(3)
+            .collect();
+    }
+
+    all
 }
 
 fn clamp_text(value: String, max_chars: usize) -> String {
@@ -5218,7 +5262,7 @@ fn build_learning_module_from_compact_ai(
         outcome: learning_module_outcome(request),
         lessons,
         capstone_quest_prompt: learning_module_capstone_prompt(request),
-        resources: default_learning_resources(),
+        resources: default_learning_resources_for_focus(&focus),
     })
 }
 
@@ -5283,6 +5327,13 @@ fn generic_learning_checkpoint_question(question: &str) -> bool {
         "zatoshi",
         "orchard",
         "payment request",
+        "wallet",
+        "transaction",
+        "address",
+        "confirmation",
+        "mempool",
+        "finality",
+        "node",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -5336,7 +5387,7 @@ fn compact_ai_lesson_to_learning_lesson(
         explanation: expanded_learning_explanation(&lesson),
         concepts: concepts.clone(),
         submodules: compact_learning_submodules(Vec::new(), &concepts),
-        resources: default_learning_resources(),
+        resources: default_learning_resources_for_focus(focus),
         checkpoint: LearningCheckpoint {
             question,
             options,
@@ -5407,6 +5458,46 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         focus, lesson.t, lesson.e, lesson.s, lesson.q
     )
     .to_lowercase();
+    if focus.to_ascii_lowercase().contains("basic")
+        || focus.to_ascii_lowercase().contains("web3")
+        || focus.to_ascii_lowercase().contains("blockchain fundamentals")
+    {
+        let mut concepts = Vec::new();
+        for (needle, concept) in [
+            ("wallet", "wallet"),
+            ("private key", "private key"),
+            ("public key", "public key"),
+            ("signature", "signature"),
+            ("address", "address"),
+            ("transaction", "transaction"),
+            ("mempool", "mempool"),
+            ("confirmation", "confirmation"),
+            ("finality", "finality"),
+            ("reorg", "reorg safety"),
+            ("utxo", "UTXO model"),
+            ("account", "account model"),
+            ("smart contract", "smart contract"),
+            ("node", "node"),
+            ("nonce", "nonce"),
+            ("replay", "replay resistance"),
+        ] {
+            if lower.contains(needle) && !concepts.iter().any(|value| value == concept) {
+                concepts.push(concept.to_string());
+            }
+        }
+        if concepts.is_empty() {
+            concepts.extend([
+                "wallet".to_string(),
+                "signature".to_string(),
+                "transaction".to_string(),
+                "node".to_string(),
+                "confirmation".to_string(),
+            ]);
+        }
+        concepts.truncate(5);
+        return concepts;
+    }
+
     let mut concepts = Vec::new();
     for (needle, concept) in [
         ("cell", "CKB cell"),
@@ -5477,7 +5568,7 @@ fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static
         "zcash" => "Zcash",
         "fiber" => "Fiber",
         "ckb" => "CKB",
-        "basics" => "Basics",
+        "basics" => "Web3 + Blockchain Basics",
         _ => "CKB/Fiber",
     }
 }
@@ -5591,7 +5682,7 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             learning_focus_label(request)
         ),
         "basics" => format!(
-            "Generate a foundations quest for {} with HTTP/API/blockchain transaction reasoning, safe authentication boundaries, denial tests, and server-owned completion evidence.",
+            "Generate a Web3 foundations quest for {} with wallet/signature/transaction reasoning, protocol evidence boundaries, replay or nonce denial tests, and server-owned completion evidence.",
             learning_focus_label(request)
         ),
         _ => format!(
@@ -5623,11 +5714,11 @@ fn learning_lesson_role(
         || discriminator.contains("blockchain")
     {
         [
-            "web and blockchain mental model: clients, servers, nodes, wallets, and protocol evidence",
-            "HTTP/API/authentication boundaries and what browser state cannot prove",
-            "transactions, keys, signatures, confirmations, and data-model differences",
-            "denial testing for replay, forged requests, stale state, and unsafe client assumptions",
-            "turning foundations understanding into a generated implementation quest",
+            "Web3 and blockchain mental model: wallets, nodes, signatures, transactions, and protocol evidence",
+            "wallet, key, address, signature-domain, and authorization boundaries",
+            "transactions, mempools, confirmations, finality, reorgs, and data-model differences",
+            "denial testing for replay, forged signatures, stale confirmations, and unsafe client assumptions",
+            "turning Web3 foundations understanding into a generated implementation quest",
         ]
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         [
@@ -5695,7 +5786,7 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         || discriminator.contains("web")
         || discriminator.contains("blockchain")
     {
-        "Ground the lesson in web and blockchain fundamentals: HTTP, APIs, authentication, frontend/backend state, transactions, wallets, keys, signatures, UTXO/account models, nodes, mempools, confirmations, privacy basics, and denial cases for generated apps."
+        "Ground the lesson in Web3 and blockchain fundamentals: wallets, private/public keys, addresses, signatures, signature domains, transactions, UTXO/account models, smart contracts or scripts, nodes, mempools, confirmations, finality, reorg safety, privacy basics, replay resistance, and denial cases for generated Web3 apps."
     } else if discriminator.contains("fiber") && !discriminator.contains("ckb") {
         "Ground the lesson in Fiber payment channels, invoices, PTLC-based security, routing, off-chain channel state, CKB settlement assumptions, and paid-access receipt verification."
     } else if discriminator.contains("ckb") && !discriminator.contains("fiber") {
@@ -5743,9 +5834,9 @@ fn learning_lesson_prompt(
 
 VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}. Learner goal: {goal}. Speciality: {background}. Pace: {pace}. Focus: {focus_directive}. Speciality lens: {speciality_directive}. {repair_directive}
 
-Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
+Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, Ethereum developer docs https://ethereum.org/developers/docs/ for Web3 wallet/account/transaction/consensus fundamentals, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, or xUDT split. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. s is one matching TypeScript/Rust code lens line. w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, xUDT split, wallet address, signature domain, transaction hash, nonce, node, mempool, or confirmation depth. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -5806,7 +5897,7 @@ Rules:
 - code_walkthrough: 3-5 short bullets, each tied to a concrete line/function/field in the generated files.
 - common_misunderstanding: name the likely wrong mental model and correct it.
 - follow_up_question: ask one question that checks whether the learner truly understood this code.
-- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, MDN, or JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Ethereum developer docs or JoyID docs when relevant.
 - Keep answer under 170 words."#,
         title = request.quest_title.trim(),
         objective = request.quest_objective.trim(),
@@ -5834,7 +5925,7 @@ Rules:
 - If the learner asks for a walkthrough, explain: concept gist, how the code lens works, what the checkpoint is testing, the likely vibecoding mistake, and one concrete denial-test habit.
 - If the learner is wrong or vague, correct the misunderstanding using the checkpoint options/feedback and ask a different related follow-up question.
 - Do not answer as a generic CKB/Fiber overview unless the lesson context is missing; connect every outside concept back to this active lesson.
-- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, MDN, or JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Ethereum developer docs or JoyID docs when relevant.
 - Keep answer under 230 words. Keep why_it_matters under 90 words. follow_up_question must be one question tied to this lesson."#,
         module = request.module_title.trim(),
         lesson = request.lesson_title.trim(),
