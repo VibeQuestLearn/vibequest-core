@@ -52,8 +52,9 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://share-ai.ckbdev.com";
 const DEFAULT_OPENAI_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Minimal;
 const DEFAULT_OPENAI_TIMEOUT_SECONDS: u64 = 90;
+const MAX_OPENAI_TIMEOUT_SECONDS: u64 = 240;
 const QUICK_QUEST_OUTPUT_TOKENS: u16 = 5200;
-const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 2600;
+const LEARNING_LESSON_OUTPUT_TOKENS: u16 = 4200;
 const TUTOR_OUTPUT_TOKENS: u16 = 780;
 
 #[derive(Clone)]
@@ -2149,7 +2150,7 @@ impl OpenAiClient {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(DEFAULT_OPENAI_TIMEOUT_SECONDS)
-            .min(DEFAULT_OPENAI_TIMEOUT_SECONDS);
+            .clamp(15, MAX_OPENAI_TIMEOUT_SECONDS);
 
         Self {
             http: Client::builder()
@@ -2272,7 +2273,10 @@ impl OpenAiClient {
                         warn!(%status, body = %clamp_text(body.clone(), 300), lesson_index, "AI lesson provider returned error status");
                     }
                     ApiError::InvalidAiResponse => {
-                        warn!(lesson_index, "AI lesson response failed validation");
+                        warn!(lesson_index, "AI lesson response failed validation; retrying once with repair contract");
+                        return self
+                            .request_learning_lesson(request, lesson_index, true)
+                            .await;
                     }
                     _ => warn!(%error, lesson_index, "AI lesson generation failed"),
                 }
@@ -2288,16 +2292,12 @@ impl OpenAiClient {
         repair: bool,
     ) -> Result<AiLearningLessonCompact, ApiError> {
         let prompt = learning_lesson_prompt(request, lesson_index, repair);
-        let lesson_timeout = if self.timeout > Duration::from_secs(45) {
-            Duration::from_secs(45)
-        } else {
-            self.timeout
-        };
+        let lesson_timeout = self.timeout;
         let lesson = self
             .post_openai_json::<AiLearningLessonCompact>(
                 prompt,
                 LEARNING_LESSON_OUTPUT_TOKENS,
-                ReasoningEffort::None,
+                self.reasoning_effort.serverless_safe(),
                 lesson_timeout,
             )
             .await?;
@@ -5282,6 +5282,17 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
     let why_words = lesson.w.split_whitespace().count();
     let bridge_words = lesson.j.split_whitespace().count();
 
+    let combined_prose = [
+        lesson.t.as_str(),
+        lesson.e.as_str(),
+        lesson.w.as_str(),
+        lesson.j.as_str(),
+        lesson.f.as_str(),
+        lesson.q.as_str(),
+        lesson.a.as_str(),
+    ]
+    .join("\n");
+
     if lesson.t.trim().is_empty()
         || explainer_words < 500
         || lesson.s.trim().is_empty()
@@ -5290,6 +5301,7 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
         || lesson.f.trim().is_empty()
         || lesson.q.trim().is_empty()
         || generic_learning_checkpoint_question(&lesson.q)
+        || contains_placeholder_learning_text(&combined_prose)
         || lesson.a.trim().is_empty()
         || wrong_answer_count != 3
         || wrong_feedback_count != 3
@@ -5298,6 +5310,28 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
     }
 
     Ok(())
+}
+
+fn contains_placeholder_learning_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let blocked = [
+        "placeholder",
+        "lorem ipsum",
+        "todo:",
+        "tbd",
+        "coming soon",
+        "insert ",
+        "fill in ",
+        "replace this",
+        "example.com",
+        "sample text",
+        "as an ai",
+        "i cannot",
+        "generic proof boundary",
+        "exact proof boundary for this lesson",
+    ];
+
+    blocked.iter().any(|needle| lower.contains(needle))
 }
 
 fn generic_learning_checkpoint_question(question: &str) -> bool {
@@ -5837,7 +5871,7 @@ fn learning_lesson_prompt(
         "s is one matching TypeScript/Rust code lens line."
     };
     let repair_directive = if repair {
-        "The previous lesson was rejected because it was short, generic, or incomplete. Return a complete lesson this time: the e field alone must be at least 520 words and must teach, not summarize."
+        "The previous lesson was rejected because it was short, generic, incomplete, placeholder-like, or did not name concrete proof-boundary fields. Return a complete lesson this time: the e field alone must be at least 560 words and must teach with concrete examples, failure cases, official-resource guidance, and no filler."
     } else {
         ""
     };
@@ -6669,6 +6703,52 @@ mod tests {
                 .to_lowercase()
                 .contains("backend")
         );
+    }
+
+    fn quality_gate_test_lesson() -> AiLearningLessonCompact {
+        let sentence = "A Zcash shielded checkout verifier must bind the ZIP-321 request, zatoshi amount, shielded address, memo policy, viewing-key boundary, confirmation depth, and network before generated code marks an order as paid. ";
+        let body = format!(
+            "{} Submodule path: request parsing -> address policy -> memo safety -> denial tests. Further study: read the official Zcash documentation and ZIP-321 payment request standard.",
+            sentence.repeat(72)
+        );
+
+        AiLearningLessonCompact {
+            t: "ZIP-321 shielded checkout trust boundary".to_string(),
+            e: body,
+            s: "export function verifyPayment(request: string) {\n  // TODO: bind the zatoshi amount before accepting\n  return parseZip321(request).network === 'testnet';\n}".to_string(),
+            w: "For a backend developer, this matters because generated checkout code can confuse a frontend paid flag with protocol evidence. The lesson forces the learner to bind request fields, network, amount, memo policy, and confirmation state before accepting payment.".to_string(),
+            j: "Build a shielded checkout verifier artifact and denial tests that mutate the ZIP-321 amount, recipient network, memo handling, and confirmation state before the order can unlock.".to_string(),
+            f: "Which checkout field would you mutate first to prove the verifier rejects unsafe payment evidence?".to_string(),
+            q: "Which ZIP-321 request, zatoshi amount, shielded address, memo, viewing key, network, and confirmation fields form the checkout proof boundary?".to_string(),
+            a: "The bound ZIP-321 recipient, zatoshi amount, memo policy, viewing-key scope, network, and confirmation state".to_string(),
+            b: vec![
+                "The frontend paid button text".to_string(),
+                "The user's Google profile name".to_string(),
+                "Any transaction hash pasted into the form".to_string(),
+            ],
+            bf: vec![
+                "Button text is application state, not Zcash payment evidence.".to_string(),
+                "Google identity can bind a learner account, but it cannot prove a shielded payment occurred.".to_string(),
+                "A transaction hash alone does not prove the expected recipient, amount, memo policy, or confirmations.".to_string(),
+            ],
+            ci: 2,
+        }
+    }
+
+    #[test]
+    fn ai_learning_quality_rejects_placeholder_prose() {
+        let mut lesson = quality_gate_test_lesson();
+        lesson.e.push_str(" placeholder content should never pass a production learning gate.");
+
+        assert!(validate_ai_learning_lesson_compact(&lesson).is_err());
+    }
+
+    #[test]
+    fn ai_learning_quality_allows_intentional_code_todo_only_in_code_lens() {
+        let lesson = quality_gate_test_lesson();
+
+        assert!(lesson.s.contains("TODO"));
+        assert!(validate_ai_learning_lesson_compact(&lesson).is_ok());
     }
 
     #[test]
