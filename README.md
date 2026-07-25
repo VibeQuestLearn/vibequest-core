@@ -1,6 +1,8 @@
 # VibeQuestLearn Core
 
-Rust and Axum backend for the ecosystem-neutral VibeQuestLearn platform. The active v3 boundary registers one focused Zcash developer track and accepts Google-backed identities only through signed Web assertions.
+Rust and Axum backend for the ecosystem-neutral VibeQuestLearn platform. Core owns account identity verification, catalog delivery, learning state, reviewed track projections, optional runner evidence, and persistence.
+
+The current grant-facing implementation is the Zcash Shielded Payments Track, but the backend contract is not tied to that track. Any CKB, Fiber, Zcash, or future ecosystem track must enter through the same catalog, curriculum, identity, submission, and evidence boundaries.
 
 ## Run
 
@@ -39,11 +41,11 @@ Protected by the assertion middleware:
 - `GET /v3/me` upserts and returns the Google-backed profile.
 - `GET /v3/me/export` exports the principal's owned v3 records.
 - `DELETE /v3/me` deletes the principal's profile and owned v3 records.
-- `POST /v3/submissions` validates one reviewed scenario submission; it fails closed pending runner review.
+- `POST /v3/submissions` validates a reviewed track submission; it fails closed when runner execution is not reviewed for that track.
 - `GET /v3/submissions/{submission_id}` returns only the authenticated principal's bounded result view.
 - `DELETE /v3/submissions/{submission_id}` requests terminal cancellation for the owner.
 
-The inherited wallet-address, quest, AI, payout, and learning handlers are no longer registered in the router. They remain temporarily as unrouted migration source and cannot be called over HTTP.
+Wallet-address ownership, reward payout, invoice completion, and client-authoritative learning handlers are not part of the v3 router contract.
 
 ## Ownership And Persistence
 
@@ -53,23 +55,41 @@ The `users` collection has a unique provider-plus-provider-subject index. Email 
 
 See `docs/authentication.md` for the trust boundary and key rotation procedure.
 
-## Zcash Domain Engine
+## Ecosystem Track Contract
 
-`src/zcash` is a network-free verifier boundary for the single shielded-checkout track. It uses exact official crate versions to inspect Revision 0 Unified Addresses, enforce receiver and network policy, validate bounded ZIP-321 ZEC requests, classify Unified Viewing Keys, and evaluate reviewed payment lifecycle fixtures.
+Every ecosystem track must be represented as a reviewed package with:
+
+- ecosystem ID;
+- track ID;
+- content version;
+- source manifest version;
+- curriculum projection;
+- optional scenario graph;
+- optional runner manifest and runner version;
+- completion policy;
+- public/hidden test boundaries when execution exists.
+
+Track-specific protocol behavior stays behind explicit adapters. A track may cite ecosystem sources, expose code lenses, or provide scenario cases, but it cannot define identity, ownership, persistence, or global completion behavior.
+
+## Current Reviewed Track: Zcash Shielded Payments
+
+`src/zcash` is a network-free verifier boundary for the shielded-checkout track. It uses exact official crate versions to inspect Revision 0 Unified Addresses, enforce receiver and network policy, validate bounded ZIP-321 ZEC requests, classify Unified Viewing Keys, and evaluate reviewed payment lifecycle fixtures.
 
 The engine returns rule IDs, source references, and safe messages without serializing raw addresses, memos, or viewing keys. It has no HTTP wallet route and cannot construct or sign a transaction. Track catalog records expose source manifest `zcash-sources-2026-07-21.2`; see `fixtures/zcash/v1/source-manifest.json` and `docs/zcash-dependency-decision.md`.
 
+This section documents the current track, not the platform architecture.
+
 ## Reviewed Curriculum
 
-`src/curriculum.rs` validates the complete five-lesson curriculum, scenario graph, official source references, answer keys, allowlisted defects, public/hidden case specifications, capstone requirements, and AI tutor contract. Every declared scenario case executes against the real Zcash verifier during Core tests.
+`src/curriculum.rs` validates the active curriculum, scenario graph, official source references, answer keys, allowlisted defects, public/hidden case specifications, capstone requirements, and AI tutor contract. Every declared scenario case executes against the reviewed verifier during Core tests when a runner is available for that track.
 
-The public curriculum endpoint works while the track is in `building` state, but returns only reviewed teaching content, code lenses, source links, checkpoint prompts, and aggregate case counts. Correct answers, rationales, hidden case IDs, seeded defects, and the solution body remain server-side.
+The public curriculum endpoint works while a track is in `building` state, but returns only reviewed teaching content, code lenses, source links, checkpoint prompts, and aggregate case counts. Correct answers, rationales, hidden case IDs, seeded defects, and solution bodies remain server-side.
 
-AI output is optional and non-authoritative. Accepted artifacts must match one lesson and scenario version, cite only reviewed sources, and contain lesson-specific anchors. A bounded in-memory cache stores accepted artifacts; when a provider is unavailable, the contract returns reviewed local material. AI never defines tests, execution evidence, or completion.
+AI output is optional and non-authoritative. Accepted artifacts must match one lesson and scenario version, cite only reviewed sources, and contain lesson-specific anchors. A bounded cache stores accepted artifacts; when a provider is unavailable, the contract returns reviewed local material. AI never defines tests, execution evidence, or completion.
 
 ## Isolated Scenario Runner
 
-The pinned dependency-free Node worker executes only the shielded-checkout scenario in a locked-down Docker container. Jobs and signed evidence bind user, submission, scenario, source, tests, protocol, and runner versions. Output is truncated and raw learner diagnostics are not returned.
+Runner execution is optional per track. The current pinned dependency-free Node worker executes only the reviewed shielded-checkout scenario in a locked-down Docker container. Jobs and signed evidence bind user, submission, scenario, source, tests, protocol, and runner versions. Output is truncated and raw learner diagnostics are not returned.
 
 Production execution remains disabled and catalog status is `review-required` until an external queue adapter is reviewed. The Core API never loads the worker private signing key. See `docs/runner-operations.md` for the exact limits, adversarial acceptance suite, key boundary, and enablement checklist.
 
@@ -83,4 +103,4 @@ cargo build --release
 cargo deny check
 ```
 
-The `zcashlearn` branch is the only implementation branch for this technical program.
+The `zcashlearn` branch is the active implementation branch for this technical program.
