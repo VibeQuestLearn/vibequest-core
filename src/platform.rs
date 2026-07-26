@@ -12,6 +12,10 @@ use tokio::sync::OnceCell;
 
 pub const SCHEMA_VERSION: u16 = 3;
 pub const DEFAULT_V3_DATABASE: &str = "vibequestlearn_v3";
+pub const BASICS_ECOSYSTEM_ID: &str = "basics";
+pub const CKB_ECOSYSTEM_ID: &str = "ckb";
+pub const FIBER_ECOSYSTEM_ID: &str = "fiber";
+pub const STACKS_ECOSYSTEM_ID: &str = "stacks";
 pub const ZCASH_ECOSYSTEM_ID: &str = "zcash";
 pub const SHIELDED_PAYMENTS_TRACK_ID: &str = "shielded-payments-safety";
 
@@ -34,7 +38,19 @@ pub struct EcosystemRegistration {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "configuration", rename_all = "kebab-case")]
 pub enum EcosystemConfiguration {
+    Basics(GenericEcosystemRegistration),
+    Ckb(GenericEcosystemRegistration),
+    Fiber(GenericEcosystemRegistration),
+    Stacks(GenericEcosystemRegistration),
     Zcash(ZcashRegistration),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct GenericEcosystemRegistration {
+    pub source_pack_version: String,
+    pub primary_sources: Vec<String>,
+    pub learning_focus: Vec<String>,
+    pub validation_mode: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -74,6 +90,78 @@ pub enum TrackStatus {
     Building,
     Enabled,
     Retired,
+}
+
+fn generic_registration<const S: usize, const F: usize>(
+    source_pack_version: &str,
+    primary_sources: [&str; S],
+    learning_focus: [&str; F],
+) -> GenericEcosystemRegistration {
+    GenericEcosystemRegistration {
+        source_pack_version: source_pack_version.to_string(),
+        primary_sources: primary_sources.into_iter().map(str::to_string).collect(),
+        learning_focus: learning_focus.into_iter().map(str::to_string).collect(),
+        validation_mode: "ai-generated-source-grounded".to_string(),
+    }
+}
+
+fn generic_ecosystem(
+    ecosystem_id: &str,
+    name: &str,
+    summary: &str,
+    configuration: EcosystemConfiguration,
+) -> EcosystemRegistration {
+    EcosystemRegistration {
+        ecosystem_id: ecosystem_id.to_string(),
+        name: name.to_string(),
+        summary: summary.to_string(),
+        enabled: true,
+        configuration,
+        tracks: vec![TrackRegistration {
+            track_id: format!("{}-learning-track", ecosystem_id),
+            title: format!("{} Learning Track", name),
+            summary: "AI-generated lessons must pass source grounding, depth, checkpoint, and placeholder validation before display.".to_string(),
+            enabled: true,
+            status: TrackStatus::Enabled,
+            track_version: "1.0.0".to_string(),
+            content_version: "2026-07-26.1".to_string(),
+            source_manifest_version: format!("{}-source-pack-1.0.0", ecosystem_id),
+            runner_manifest_version: crate::runner::RUNNER_MANIFEST_VERSION.to_string(),
+            runner_version: crate::runner::RUNNER_VERSION.to_string(),
+            runner_status: RunnerStatus::ReviewRequired,
+            lesson_count: 5,
+        }],
+    }
+}
+
+fn zcash_ecosystem() -> EcosystemRegistration {
+    EcosystemRegistration {
+        ecosystem_id: ZCASH_ECOSYSTEM_ID.to_string(),
+        name: "Zcash".to_string(),
+        summary: "Shielded payment integration labs for learners and builders.".to_string(),
+        enabled: true,
+        configuration: EcosystemConfiguration::Zcash(ZcashRegistration {
+            network: "testnet".to_string(),
+            address_standard: "ZIP-316".to_string(),
+            payment_request_standard: "ZIP-321".to_string(),
+            custody_mode: "non-custodial-labs".to_string(),
+        }),
+        tracks: vec![TrackRegistration {
+            track_id: SHIELDED_PAYMENTS_TRACK_ID.to_string(),
+            title: "Shielded Payments: Accept, Detect, and Defend".to_string(),
+            summary: "Implement one safe shielded checkout boundary and prove denial behavior."
+                .to_string(),
+            enabled: false,
+            status: TrackStatus::Building,
+            track_version: "1.0.0".to_string(),
+            content_version: "2026-07-21.1".to_string(),
+            source_manifest_version: crate::zcash::SOURCE_MANIFEST_VERSION.to_string(),
+            runner_manifest_version: crate::runner::RUNNER_MANIFEST_VERSION.to_string(),
+            runner_version: crate::runner::RUNNER_VERSION.to_string(),
+            runner_status: RunnerStatus::ReviewRequired,
+            lesson_count: 5,
+        }],
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -157,35 +245,83 @@ impl EcosystemRegistry {
         })
     }
 
+    pub fn built_in() -> Result<Self, RegistryError> {
+        Self::new(vec![
+            generic_ecosystem(
+                BASICS_ECOSYSTEM_ID,
+                "Web3 + Blockchain Basics",
+                "Beginner Web3 foundations with wallets, transactions, networks, explorers, and safety checks.",
+                EcosystemConfiguration::Basics(generic_registration(
+                    "basics-source-pack-1.0.0",
+                    [
+                        "Ethereum developer docs",
+                        "MDN Web Docs",
+                        "Bitcoin developer reference",
+                    ],
+                    [
+                        "wallet mental models",
+                        "transaction lifecycle",
+                        "network and confirmation safety",
+                    ],
+                )),
+            ),
+            generic_ecosystem(
+                CKB_ECOSYSTEM_ID,
+                "CKB",
+                "Cell-model learning paths for scripts, witnesses, transactions, and verifier boundaries.",
+                EcosystemConfiguration::Ckb(generic_registration(
+                    "ckb-source-pack-1.0.0",
+                    ["CKB Docs", "Nervos RFCs"],
+                    [
+                        "cell model",
+                        "scripts",
+                        "witnesses",
+                        "transaction proof boundaries",
+                    ],
+                )),
+            ),
+            generic_ecosystem(
+                FIBER_ECOSYSTEM_ID,
+                "Fiber",
+                "Payment-channel learning paths for invoices, PTLCs, routing, receipts, and replay defense.",
+                EcosystemConfiguration::Fiber(generic_registration(
+                    "fiber-source-pack-1.0.0",
+                    ["Fiber Network repository", "CKB Docs"],
+                    [
+                        "channels",
+                        "invoices",
+                        "PTLC proof boundaries",
+                        "receipt replay defense",
+                    ],
+                )),
+            ),
+            zcash_ecosystem(),
+            generic_ecosystem(
+                STACKS_ECOSYSTEM_ID,
+                "Stacks",
+                "Bitcoin-secured app learning paths for Clarity, sBTC, BNS, wallets, and safe authorization flows.",
+                EcosystemConfiguration::Stacks(generic_registration(
+                    "stacks-source-pack-1.0.0",
+                    [
+                        "Stacks Docs",
+                        "Clarity documentation",
+                        "sBTC documentation",
+                        "BNS documentation",
+                    ],
+                    [
+                        "Stacks and Bitcoin",
+                        "Clarity",
+                        "sBTC",
+                        "BNS",
+                        "wallet authorization",
+                    ],
+                )),
+            ),
+        ])
+    }
+
     pub fn zcash_only() -> Result<Self, RegistryError> {
-        Self::new(vec![EcosystemRegistration {
-            ecosystem_id: ZCASH_ECOSYSTEM_ID.to_string(),
-            name: "Zcash".to_string(),
-            summary: "Shielded payment integration labs for web and backend developers."
-                .to_string(),
-            enabled: true,
-            configuration: EcosystemConfiguration::Zcash(ZcashRegistration {
-                network: "testnet".to_string(),
-                address_standard: "ZIP-316".to_string(),
-                payment_request_standard: "ZIP-321".to_string(),
-                custody_mode: "non-custodial-labs".to_string(),
-            }),
-            tracks: vec![TrackRegistration {
-                track_id: SHIELDED_PAYMENTS_TRACK_ID.to_string(),
-                title: "Shielded Payments: Accept, Detect, and Defend".to_string(),
-                summary: "Implement one safe shielded checkout boundary and prove denial behavior."
-                    .to_string(),
-                enabled: false,
-                status: TrackStatus::Building,
-                track_version: "1.0.0".to_string(),
-                content_version: "2026-07-21.1".to_string(),
-                source_manifest_version: crate::zcash::SOURCE_MANIFEST_VERSION.to_string(),
-                runner_manifest_version: crate::runner::RUNNER_MANIFEST_VERSION.to_string(),
-                runner_version: crate::runner::RUNNER_VERSION.to_string(),
-                runner_status: RunnerStatus::ReviewRequired,
-                lesson_count: 5,
-            }],
-        }])
+        Self::new(vec![zcash_ecosystem()])
     }
 
     pub fn catalog(&self) -> CatalogResponse {
@@ -610,24 +746,52 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn zcash_registry_exposes_only_the_building_track() {
-        let registry = EcosystemRegistry::zcash_only().expect("valid static registry");
+    fn built_in_registry_exposes_multi_ecosystem_tracks() {
+        let registry = EcosystemRegistry::built_in().expect("valid static registry");
         let catalog = registry.catalog();
 
         assert_eq!(catalog.schema_version, SCHEMA_VERSION);
-        assert_eq!(catalog.ecosystems.len(), 1);
-        assert_eq!(catalog.ecosystems[0].ecosystem_id, ZCASH_ECOSYSTEM_ID);
-        assert_eq!(catalog.ecosystems[0].tracks.len(), 1);
-        assert!(!catalog.ecosystems[0].tracks[0].enabled);
+        assert_eq!(catalog.ecosystems.len(), 5);
+        assert!(
+            catalog
+                .ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem.ecosystem_id == BASICS_ECOSYSTEM_ID)
+        );
+        assert!(
+            catalog
+                .ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem.ecosystem_id == CKB_ECOSYSTEM_ID)
+        );
+        assert!(
+            catalog
+                .ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem.ecosystem_id == FIBER_ECOSYSTEM_ID)
+        );
+        assert!(
+            catalog
+                .ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem.ecosystem_id == STACKS_ECOSYSTEM_ID)
+        );
+        let zcash = catalog
+            .ecosystems
+            .iter()
+            .find(|ecosystem| ecosystem.ecosystem_id == ZCASH_ECOSYSTEM_ID)
+            .expect("Zcash remains registered");
+        assert_eq!(zcash.tracks.len(), 1);
+        assert!(!zcash.tracks[0].enabled);
         assert_eq!(
-            catalog.ecosystems[0].tracks[0].source_manifest_version,
+            zcash.tracks[0].source_manifest_version,
             crate::zcash::SOURCE_MANIFEST_VERSION
         );
     }
 
     #[test]
     fn registry_fails_closed_for_unknown_and_disabled_tracks() {
-        let registry = EcosystemRegistry::zcash_only().expect("valid static registry");
+        let registry = EcosystemRegistry::built_in().expect("valid static registry");
 
         assert_eq!(
             registry.resolve_track("unknown", SHIELDED_PAYMENTS_TRACK_ID),

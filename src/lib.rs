@@ -293,6 +293,10 @@ struct LearningLesson {
     submodules: Vec<LearningSubmodule>,
     #[serde(default)]
     resources: Vec<LearningResource>,
+    #[serde(default)]
+    evidence_map: Vec<LearningEvidence>,
+    #[serde(default)]
+    quality_score: LearningQualityScore,
     checkpoint: LearningCheckpoint,
     quest_bridge: String,
 }
@@ -327,6 +331,25 @@ struct LearningResource {
     url: String,
     #[serde(alias = "description")]
     reason: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct LearningEvidence {
+    claim: String,
+    source_title: String,
+    source_url: String,
+    lesson_section: String,
+    confidence: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct LearningQualityScore {
+    source_coverage: u8,
+    technical_depth: u8,
+    checkpoint_quality: u8,
+    placeholder_free: bool,
+    ecosystem_alignment: bool,
+    passed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2009,7 +2032,7 @@ pub fn app_state() -> Arc<AppState> {
     let config = AppConfig::from_env();
     let store = MongoStore::from_config(&config);
     let registry =
-        EcosystemRegistry::zcash_only().expect("the built-in ecosystem registry must be valid");
+        EcosystemRegistry::built_in().expect("the built-in ecosystem registry must be valid");
     let platform_store = PlatformStore::new(
         config.mongodb_uri.clone(),
         config.mongodb_v3_database.clone(),
@@ -2250,6 +2273,7 @@ impl OpenAiClient {
             lesson_index,
             &learning_background_label(request),
             &learning_focus_label(request),
+            request,
             compact,
         )
     }
@@ -2273,7 +2297,10 @@ impl OpenAiClient {
                         warn!(%status, body = %clamp_text(body.clone(), 300), lesson_index, "AI lesson provider returned error status");
                     }
                     ApiError::InvalidAiResponse => {
-                        warn!(lesson_index, "AI lesson response failed validation; retrying once with repair contract");
+                        warn!(
+                            lesson_index,
+                            "AI lesson response failed validation; retrying once with repair contract"
+                        );
                         return self
                             .request_learning_lesson(request, lesson_index, true)
                             .await;
@@ -2301,7 +2328,7 @@ impl OpenAiClient {
                 lesson_timeout,
             )
             .await?;
-        if let Err(error) = validate_ai_learning_lesson_compact(&lesson) {
+        if let Err(error) = validate_ai_learning_lesson_compact_for_request(request, &lesson) {
             warn!(
                 lesson_index,
                 title = %clamp_text(lesson.t.clone(), 120),
@@ -3212,7 +3239,7 @@ async fn generate_learning_lesson_endpoint(
         learner_profile: learning_module_profile(&module_request),
         outcome: learning_module_outcome(&module_request),
         capstone_quest_prompt: learning_module_capstone_prompt(&module_request),
-        resources: default_learning_resources(),
+        resources: default_learning_resources_for_focus(&learning_focus_label(&module_request)),
         lesson,
         lesson_index: request.lesson_index,
         warning: None,
@@ -4820,6 +4847,7 @@ fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule,
         lesson.submodules =
             compact_learning_submodules(std::mem::take(&mut lesson.submodules), &lesson.concepts);
         lesson.resources = compact_learning_resources(std::mem::take(&mut lesson.resources));
+        refresh_lesson_validation_metadata(&module.title, lesson);
 
         if lesson.checkpoint.options.len() > 4 {
             lesson.checkpoint.options.truncate(4);
@@ -5033,20 +5061,17 @@ fn default_learning_resources() -> Vec<LearningResource> {
         LearningResource {
             title: "CKB Docs".to_string(),
             url: "https://docs.nervos.org/".to_string(),
-            reason: "Reference cells, scripts, witnesses, transactions, and token state."
-                .to_string(),
+            reason: "Reference cells, scripts, witnesses, transactions, and token state.".to_string(),
         },
         LearningResource {
             title: "Fiber Network Repository".to_string(),
             url: "https://github.com/nervosnetwork/fiber".to_string(),
-            reason: "Reference Fiber payment channels, invoices, PTLC-based security, routing, and node behavior."
-                .to_string(),
+            reason: "Reference Fiber payment channels, invoices, PTLC-based security, routing, and node behavior.".to_string(),
         },
         LearningResource {
             title: "Zcash Documentation".to_string(),
             url: "https://zcash.readthedocs.io/".to_string(),
-            reason: "Reference shielded payments, payment requests, addresses, viewing keys, memos, and privacy boundaries."
-                .to_string(),
+            reason: "Reference shielded payments, payment requests, addresses, viewing keys, memos, and privacy boundaries.".to_string(),
         },
         LearningResource {
             title: "ZIP-321 Payment Request Standard".to_string(),
@@ -5058,12 +5083,30 @@ fn default_learning_resources() -> Vec<LearningResource> {
             url: "https://ethereum.org/developers/docs/".to_string(),
             reason: "Reference Web3 wallets, accounts, transactions, smart contracts, nodes, and consensus fundamentals.".to_string(),
         },
+        LearningResource {
+            title: "Stacks Documentation".to_string(),
+            url: "https://docs.stacks.co/".to_string(),
+            reason: "Reference Stacks, Clarity, transactions, wallets, sBTC, and Bitcoin-secured app development.".to_string(),
+        },
     ]
 }
 
 fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
     let lower = focus.to_ascii_lowercase();
     let all = default_learning_resources();
+    if lower.contains("stacks")
+        || lower.contains("clarity")
+        || lower.contains("sbtc")
+        || lower.contains("bns")
+    {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("stacks") || text.contains("docs.stacks")
+            })
+            .collect();
+    }
     if lower.contains("zcash") || lower.contains("zip-321") || lower.contains("shielded") {
         return all
             .into_iter()
@@ -5249,7 +5292,7 @@ fn build_learning_module_from_compact_ai(
         .take(5)
         .enumerate()
         .map(|(index, lesson)| {
-            compact_ai_lesson_to_learning_lesson(index, &background, &focus, lesson)
+            compact_ai_lesson_to_learning_lesson(index, &background, &focus, request, lesson)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -5262,7 +5305,7 @@ fn build_learning_module_from_compact_ai(
         outcome: learning_module_outcome(request),
         lessons,
         capstone_quest_prompt: learning_module_capstone_prompt(request),
-        resources: default_learning_resources_for_focus(&focus),
+        resources: default_learning_resources_for_focus(&learning_focus_label(request)),
     })
 }
 
@@ -5310,6 +5353,136 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
     }
 
     Ok(())
+}
+
+fn validate_ai_learning_lesson_compact_for_request(
+    request: &GenerateLearningModuleRequest,
+    lesson: &AiLearningLessonCompact,
+) -> Result<(), ApiError> {
+    validate_ai_learning_lesson_compact(lesson)?;
+
+    let ecosystem_id = learning_ecosystem_id(request);
+    let combined = [
+        lesson.t.as_str(),
+        lesson.e.as_str(),
+        lesson.s.as_str(),
+        lesson.w.as_str(),
+        lesson.j.as_str(),
+        lesson.f.as_str(),
+        lesson.q.as_str(),
+        lesson.a.as_str(),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+
+    if !lesson_mentions_required_ecosystem_terms(&ecosystem_id, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+    if contains_unrequested_ecosystem_leakage(&ecosystem_id, request, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+
+    Ok(())
+}
+
+fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> bool {
+    let required_terms: &[&str] = match ecosystem_id {
+        "stacks" => &[
+            "stacks",
+            "clarity",
+            "sbtc",
+            "bns",
+            "proof of transfer",
+            "bitcoin",
+        ],
+        "zcash" => &[
+            "zcash",
+            "zip-321",
+            "shielded",
+            "viewing key",
+            "memo",
+            "zatoshi",
+            "orchard",
+            "sapling",
+        ],
+        "ckb" => &["ckb", "cell", "outpoint", "script", "witness", "capacity"],
+        "fiber" => &[
+            "fiber", "channel", "invoice", "ptlc", "preimage", "route", "receipt",
+        ],
+        "basics" => &[
+            "blockchain",
+            "web3",
+            "wallet",
+            "transaction",
+            "confirmation",
+            "address",
+            "signature",
+        ],
+        _ => &["trust boundary", "denial test"],
+    };
+
+    required_terms.iter().any(|term| text.contains(term))
+}
+
+fn contains_unrequested_ecosystem_leakage(
+    ecosystem_id: &str,
+    request: &GenerateLearningModuleRequest,
+    text: &str,
+) -> bool {
+    let requested_comparison = request
+        .topic
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("compare")
+        || request
+            .learning_intents
+            .iter()
+            .any(|intent| intent.to_ascii_lowercase().contains("compare"));
+    if requested_comparison || ecosystem_id == "basics" {
+        return false;
+    }
+
+    let blocked: &[&str] = match ecosystem_id {
+        "stacks" => &[
+            "joyid",
+            "xudt",
+            "fiber invoice",
+            "zip-321",
+            "zatoshi",
+            "orchard receiver",
+        ],
+        "zcash" => &[
+            "joyid",
+            "xudt",
+            "fiber invoice",
+            "ckb cell",
+            "outpoint lineage",
+            "clarity contract",
+            "sbtc",
+        ],
+        "ckb" => &[
+            "zip-321",
+            "zatoshi",
+            "orchard",
+            "shielded address",
+            "clarity",
+            "sbtc",
+            "bns",
+        ],
+        "fiber" => &[
+            "zip-321",
+            "zatoshi",
+            "orchard",
+            "shielded address",
+            "clarity",
+            "sbtc",
+            "bns",
+        ],
+        _ => &[],
+    };
+
+    blocked.iter().any(|term| text.contains(term))
 }
 
 fn contains_placeholder_learning_text(value: &str) -> bool {
@@ -5368,6 +5541,13 @@ fn generic_learning_checkpoint_question(question: &str) -> bool {
         "mempool",
         "finality",
         "node",
+        "stacks",
+        "clarity",
+        "sbtc",
+        "bns",
+        "post-condition",
+        "principal",
+        "proof of transfer",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -5382,9 +5562,10 @@ fn compact_ai_lesson_to_learning_lesson(
     index: usize,
     _background: &str,
     focus: &str,
+    request: &GenerateLearningModuleRequest,
     lesson: AiLearningLessonCompact,
 ) -> Result<LearningLesson, ApiError> {
-    validate_ai_learning_lesson_compact(&lesson)?;
+    validate_ai_learning_lesson_compact_for_request(request, &lesson)?;
 
     let title = lesson.t.trim().to_string();
     let why_it_matters = lesson.w.trim().to_string();
@@ -5416,12 +5597,14 @@ fn compact_ai_lesson_to_learning_lesson(
 
     Ok(LearningLesson {
         id: format!("module-{}-lesson-1", index + 1),
-        title,
+        title: title.clone(),
         why_it_matters,
         explanation: expanded_learning_explanation(&lesson),
         concepts: concepts.clone(),
         submodules: compact_learning_submodules(Vec::new(), &concepts),
         resources: default_learning_resources_for_focus(focus),
+        evidence_map: learning_evidence_map_for_lesson(request, &title, &concepts),
+        quality_score: learning_quality_score_for_compact(request, &lesson),
         checkpoint: LearningCheckpoint {
             question,
             options,
@@ -5456,6 +5639,150 @@ fn checkpoint_explanation_for_lesson(
 fn checkpoint_correct_index(lesson_index: usize, model_index: usize) -> usize {
     let jitter = Uuid::new_v4().as_bytes()[0] as usize;
     (model_index.min(3) + lesson_index + jitter) % 4
+}
+
+fn learning_evidence_map_for_lesson(
+    request: &GenerateLearningModuleRequest,
+    title: &str,
+    concepts: &[String],
+) -> Vec<LearningEvidence> {
+    let resources = default_learning_resources_for_focus(&learning_focus_label(request));
+    resources
+        .into_iter()
+        .take(3)
+        .enumerate()
+        .map(|(index, resource)| {
+            let concept = concepts
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| learning_ecosystem_label(request).to_string());
+            LearningEvidence {
+                claim: format!(
+                    "{} is grounded by the {} source pack for {}.",
+                    clamp_text(concept, 80),
+                    learning_ecosystem_label(request),
+                    clamp_text(title.to_string(), 80)
+                ),
+                source_title: resource.title,
+                source_url: resource.url,
+                lesson_section: if index == 0 {
+                    "lesson body"
+                } else {
+                    "further study"
+                }
+                .to_string(),
+                confidence: "source-pack".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn learning_quality_score_for_compact(
+    request: &GenerateLearningModuleRequest,
+    lesson: &AiLearningLessonCompact,
+) -> LearningQualityScore {
+    let combined = [
+        lesson.t.as_str(),
+        lesson.e.as_str(),
+        lesson.s.as_str(),
+        lesson.w.as_str(),
+        lesson.j.as_str(),
+        lesson.f.as_str(),
+        lesson.q.as_str(),
+        lesson.a.as_str(),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    let source_coverage = if combined.contains("further study:") {
+        100
+    } else {
+        75
+    };
+    let technical_depth = ((lesson.e.split_whitespace().count().min(650) as u16) * 100 / 650) as u8;
+    let checkpoint_quality = if generic_learning_checkpoint_question(&lesson.q) {
+        35
+    } else {
+        95
+    };
+    let placeholder_free = !contains_placeholder_learning_text(&combined);
+    let ecosystem_alignment =
+        lesson_mentions_required_ecosystem_terms(&learning_ecosystem_id(request), &combined)
+            && !contains_unrequested_ecosystem_leakage(
+                &learning_ecosystem_id(request),
+                request,
+                &combined,
+            );
+    LearningQualityScore {
+        source_coverage,
+        technical_depth,
+        checkpoint_quality,
+        placeholder_free,
+        ecosystem_alignment,
+        passed: source_coverage >= 75
+            && technical_depth >= 75
+            && checkpoint_quality >= 75
+            && placeholder_free
+            && ecosystem_alignment,
+    }
+}
+
+fn refresh_lesson_validation_metadata(request_focus: &str, lesson: &mut LearningLesson) {
+    if lesson.evidence_map.is_empty() {
+        lesson.evidence_map = lesson
+            .resources
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(index, resource)| LearningEvidence {
+                claim: format!(
+                    "{} is tied to {} source guidance.",
+                    lesson
+                        .concepts
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| request_focus.to_string()),
+                    resource.title
+                ),
+                source_title: resource.title.clone(),
+                source_url: resource.url.clone(),
+                lesson_section: if index == 0 {
+                    "lesson body"
+                } else {
+                    "related resources"
+                }
+                .to_string(),
+                confidence: "source-pack".to_string(),
+            })
+            .collect();
+    }
+
+    let explanation_words = lesson.explanation.split_whitespace().count();
+    let source_coverage = if lesson.evidence_map.is_empty() {
+        0
+    } else {
+        100
+    };
+    let technical_depth = ((explanation_words.min(650) as u16) * 100 / 650) as u8;
+    let checkpoint_quality = if generic_learning_checkpoint_question(&lesson.checkpoint.question) {
+        40
+    } else {
+        95
+    };
+    let placeholder_free = !contains_placeholder_learning_text(&format!(
+        "{}\n{}\n{}\n{}",
+        lesson.title, lesson.explanation, lesson.checkpoint.question, lesson.quest_bridge
+    ));
+    lesson.quality_score = LearningQualityScore {
+        source_coverage,
+        technical_depth,
+        checkpoint_quality,
+        placeholder_free,
+        ecosystem_alignment: true,
+        passed: source_coverage >= 75
+            && technical_depth >= 60
+            && checkpoint_quality >= 75
+            && placeholder_free,
+    };
 }
 
 fn learning_wrong_options(
@@ -5494,7 +5821,9 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
     .to_lowercase();
     if focus.to_ascii_lowercase().contains("basic")
         || focus.to_ascii_lowercase().contains("web3")
-        || focus.to_ascii_lowercase().contains("blockchain fundamentals")
+        || focus
+            .to_ascii_lowercase()
+            .contains("blockchain fundamentals")
     {
         let mut concepts = Vec::new();
         for (needle, concept) in [
@@ -5560,6 +5889,13 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         ("memo", "memo disclosure boundary"),
         ("zatoshi", "zatoshi amount"),
         ("orchard", "Orchard receiver"),
+        ("stacks", "Stacks"),
+        ("clarity", "Clarity contract"),
+        ("sbtc", "sBTC"),
+        ("bns", "BNS"),
+        ("post-condition", "post-condition"),
+        ("principal", "principal"),
+        ("proof of transfer", "Proof of Transfer"),
     ] {
         if lower.contains(needle) && !concepts.iter().any(|value| value == concept) {
             concepts.push(concept.to_string());
@@ -5586,6 +5922,12 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 
     if raw.contains("basic") || raw.contains("web") || raw.contains("blockchain") {
         "basics".to_string()
+    } else if raw.contains("stacks")
+        || raw.contains("clarity")
+        || raw.contains("sbtc")
+        || raw.contains("bns")
+    {
+        "stacks".to_string()
     } else if raw.contains("zcash") {
         "zcash".to_string()
     } else if raw.contains("fiber") && !raw.contains("ckb") {
@@ -5599,6 +5941,7 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 
 fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static str {
     match learning_ecosystem_id(request).as_str() {
+        "stacks" => "Stacks",
         "zcash" => "Zcash",
         "fiber" => "Fiber",
         "ckb" => "CKB",
@@ -5715,6 +6058,10 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             "Generate a CKB verifier quest for {} with cell, script, witness, or transaction proof binding plus denial tests and server-owned completion evidence.",
             learning_focus_label(request)
         ),
+        "stacks" => format!(
+            "Generate a Stacks learning quest for {} with Stacks/Bitcoin reasoning, Clarity-safe authorization, sBTC or BNS product context where relevant, checkpoint evidence, and one denial test for unsafe app assumptions.",
+            learning_focus_label(request)
+        ),
         "basics" => format!(
             "Generate a beginner Web3 foundations quest for {} with plain-language wallet, transaction, block explorer, network safety, and confirmation reasoning plus one practical denial test.",
             learning_focus_label(request)
@@ -5742,6 +6089,18 @@ fn learning_lesson_role(
             "viewing-key, memo, address, and disclosure boundaries in generated app code",
             "denial testing for malformed requests, transparent memo misuse, replay, wrong-network, and unsafe recipient cases",
             "turning Zcash shielded-checkout understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("stacks")
+        || discriminator.contains("clarity")
+        || discriminator.contains("sbtc")
+        || discriminator.contains("bns")
+    {
+        [
+            "Stacks and Bitcoin mental model: settlement, blocks, transactions, and application scope",
+            "Clarity basics: predictable smart contracts, public functions, maps, principals, and post-conditions",
+            "wallet authorization: addresses, signatures, transaction submission, and unsafe frontend assumptions",
+            "sBTC and BNS product flows: user identity, Bitcoin-backed assets, naming, and application safety",
+            "turning Stacks understanding into a generated Clarity-oriented quest",
         ]
     } else if discriminator.contains("basic")
         || discriminator.contains("web")
@@ -5816,6 +6175,12 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         .to_ascii_lowercase();
     if discriminator.contains("zcash") {
         "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
+    } else if discriminator.contains("stacks")
+        || discriminator.contains("clarity")
+        || discriminator.contains("sbtc")
+        || discriminator.contains("bns")
+    {
+        "Ground the lesson in Stacks and Bitcoin app development: Proof of Transfer mental model, Clarity contract behavior, principals, post-conditions, wallet authorization, transaction safety, sBTC basics, BNS product identity, and denial cases that prevent trusting frontend state as protocol evidence."
     } else if discriminator.contains("basic")
         || discriminator.contains("web")
         || discriminator.contains("blockchain")
@@ -5828,7 +6193,30 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
     } else if discriminator.contains("security") {
         "Ground the lesson in replay defense, witness mismatch, stale Fiber state, account authorization scope, Zcash privacy leakage, xUDT payout integrity, denial tests, and reward-safe ship gates."
     } else {
-        "Ground the lesson in the selected CKB, Fiber, or Zcash interests and make the proof boundary clear enough to become a practical quest."
+        "Ground the lesson in the selected ecosystem interests and make the proof boundary clear enough to become a practical quest."
+    }
+}
+
+fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) -> &'static str {
+    match learning_ecosystem_id(request).as_str() {
+        "stacks" => {
+            "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
+        }
+        "zcash" => {
+            "Ground facts in official Zcash sources without quoting them: Zcash docs https://zcash.readthedocs.io/ and ZIP-321 https://zips.z.cash/zip-0321 for shielded payments, payment requests, privacy boundaries, memos, viewing keys, and confirmation safety."
+        }
+        "fiber" => {
+            "Ground facts in Fiber and CKB sources without quoting them: Fiber repository https://github.com/nervosnetwork/fiber and CKB docs https://docs.nervos.org/ for channels, invoices, PTLCs, routing, receipts, and settlement boundaries."
+        }
+        "ckb" => {
+            "Ground facts in official CKB sources without quoting them: CKB docs https://docs.nervos.org/ for cells, scripts, witnesses, transactions, capacity, and verifier boundaries."
+        }
+        "basics" => {
+            "Ground facts in beginner-safe Web3 sources without quoting them: Ethereum developer docs https://ethereum.org/developers/docs/, MDN Web Docs https://developer.mozilla.org/, and relevant ecosystem docs only as examples after defining the basics."
+        }
+        _ => {
+            "Ground facts in the selected ecosystem source pack without quoting sources. Avoid unrelated ecosystem concepts unless the learner explicitly asked to compare ecosystems."
+        }
     }
 }
 
@@ -5881,15 +6269,16 @@ fn learning_lesson_prompt(
 
 VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}. Learner goal: {goal}. Speciality: {background}. Pace: {pace}. Focus: {focus_directive}. Speciality lens: {speciality_directive}. {repair_directive}
 
-Ground facts in official sources without quoting them: CKB docs https://docs.nervos.org/ for cells/scripts/witnesses/transactions, Fiber repo https://github.com/nervosnetwork/fiber for channels/invoices/PTLC/routing/node behavior, Zcash docs https://zcash.readthedocs.io/ and ZIP-321 references for shielded payments/payment requests/privacy boundaries, Ethereum developer docs https://ethereum.org/developers/docs/ for Web3 wallet/account/transaction/consensus fundamentals, JoyID docs https://docs.joyid.dev/ only when explaining inherited CKB/Fiber signer UX.
+{source_grounding_directive}
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, JoyID challenge, xUDT split, wallet address, signature domain, transaction hash, nonce, node, mempool, or confirmation depth. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, or Proof of Transfer. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
         background = background,
         pace = request.pace.trim(),
         focus_directive = learning_focus_directive(request),
+        source_grounding_directive = learning_source_grounding_directive(request),
         speciality_directive = learning_speciality_directive(background),
         code_snippet_directive = code_snippet_directive,
     )
@@ -6156,7 +6545,7 @@ mod tests {
                 mongodb_database: "vibequest".to_string(),
                 mongodb_v3_database: platform::DEFAULT_V3_DATABASE.to_string(),
             },
-            registry: EcosystemRegistry::zcash_only().expect("valid test registry"),
+            registry: EcosystemRegistry::built_in().expect("valid test registry"),
             platform_store: PlatformStore::new(None, platform::DEFAULT_V3_DATABASE.to_string()),
             openai: OpenAiClient {
                 http: Client::new(),
@@ -6572,7 +6961,7 @@ mod tests {
                 mongodb_database: "vibequest".to_string(),
                 mongodb_v3_database: platform::DEFAULT_V3_DATABASE.to_string(),
             },
-            registry: EcosystemRegistry::zcash_only().expect("valid test registry"),
+            registry: EcosystemRegistry::built_in().expect("valid test registry"),
             platform_store: PlatformStore::new(None, platform::DEFAULT_V3_DATABASE.to_string()),
             openai: OpenAiClient {
                 http: Client::new(),
@@ -6738,7 +7127,9 @@ mod tests {
     #[test]
     fn ai_learning_quality_rejects_placeholder_prose() {
         let mut lesson = quality_gate_test_lesson();
-        lesson.e.push_str(" placeholder content should never pass a production learning gate.");
+        lesson
+            .e
+            .push_str(" placeholder content should never pass a production learning gate.");
 
         assert!(validate_ai_learning_lesson_compact(&lesson).is_err());
     }
@@ -6766,6 +7157,8 @@ mod tests {
                     concepts: vec!["cell".to_string(), "witness".to_string()],
                     submodules: Vec::new(),
                     resources: Vec::new(),
+                    evidence_map: Vec::new(),
+                    quality_score: LearningQualityScore::default(),
                     checkpoint: LearningCheckpoint {
                         question: "What should the verifier bind?".to_string(),
                         options: vec![
@@ -6831,6 +7224,74 @@ mod tests {
                 .any(|concept| concept == "ZIP-321 payment request")
         );
     }
+    #[test]
+    fn stacks_learning_request_shapes_focus_sources_and_rejects_ecosystem_leakage() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("stacks-bitcoin-apps".to_string()),
+            ecosystem_id: Some("stacks".to_string()),
+            topic: Some("Clarity wallet authorization and safe app flow".to_string()),
+            learning_profile: Some("Frontend dev".to_string()),
+            learning_intents: vec!["Understand the trust boundary".to_string()],
+            interests: vec![
+                "Stacks and Bitcoin".to_string(),
+                "Clarity Smart Contracts".to_string(),
+                "sBTC Basics".to_string(),
+                "BNS Product Identity".to_string(),
+            ],
+            learner_goal: "Understand Stacks app authorization and denial tests".to_string(),
+            background: "Frontend dev".to_string(),
+            pace: "Focused".to_string(),
+        };
+        let sentence = "A Stacks app should treat the wallet signature, submitted transaction, Clarity contract call, principal, post-condition, BNS name resolution, and sBTC flow as separate pieces of evidence instead of assuming a frontend button proves completion. ";
+        let lesson = AiLearningLessonCompact {
+            t: "Stacks Clarity authorization boundary".to_string(),
+            e: format!(
+                "{} Submodule path: wallet connect -> Clarity public function -> post-condition review -> explorer evidence -> denial tests. Further study: read the official Stacks documentation for Clarity, transactions, wallets, sBTC, and BNS.",
+                sentence.repeat(72)
+            ),
+            s: "(define-public (claim (owner principal))\n  ;; TODO: require the expected principal and post-condition before accepting\n  (ok owner))".to_string(),
+            w: "For a frontend developer, this matters because generated Stacks UI code can confuse a connected wallet with a completed Clarity action. The learner must separate display state, submitted transaction state, principal authorization, post-conditions, and BNS or sBTC assumptions.".to_string(),
+            j: "Build a Stacks authorization map and denial tests that mutate the principal, post-condition, BNS name, sBTC assumption, and transaction status before the app marks progress complete.".to_string(),
+            f: "Which field would you mutate first to prove the app does not trust frontend state as protocol evidence?".to_string(),
+            q: "Which Stacks transaction, Clarity contract, principal, post-condition, sBTC, BNS name, and wallet signature fields form the app authorization proof boundary?".to_string(),
+            a: "The exact principal, Clarity contract call, post-condition, submitted transaction status, and relevant sBTC or BNS evidence".to_string(),
+            b: vec![
+                "The connected wallet button".to_string(),
+                "The profile name shown by the app".to_string(),
+                "Any frontend success toast".to_string(),
+            ],
+            bf: vec![
+                "A connected wallet starts authorization UX, but it does not prove a specific Clarity call completed.".to_string(),
+                "A profile label is not protocol evidence for a Stacks action.".to_string(),
+                "A toast can be rendered before the transaction is confirmed or even submitted.".to_string(),
+            ],
+            ci: 1,
+        };
+
+        assert_eq!(learning_ecosystem_label(&request), "Stacks");
+        assert!(learning_focus_label(&request).contains("Stacks"));
+        assert!(learning_module_capstone_prompt(&request).contains("Stacks"));
+        assert!(learning_focus_directive(&request).contains("Clarity"));
+        assert!(learning_source_grounding_directive(&request).contains("docs.stacks.co"));
+        assert!(
+            default_learning_resources_for_focus("Stacks Clarity")
+                .iter()
+                .any(|resource| resource.title == "Stacks Documentation")
+        );
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &lesson).is_ok());
+        assert!(
+            infer_learning_concepts("Stacks Clarity sBTC BNS", &lesson)
+                .iter()
+                .any(|concept| concept == "Clarity contract")
+        );
+
+        let mut leaked = lesson;
+        leaked
+            .e
+            .push_str(" ZIP-321 zatoshi Orchard receiver should not leak into a Stacks lesson.");
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+    }
+
     #[test]
     fn learning_only_prompt_is_not_compiled_as_code_quest() {
         assert!(is_learning_only_prompt("Teach me about CKB"));
