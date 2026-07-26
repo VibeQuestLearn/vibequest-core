@@ -38,7 +38,7 @@ use ring::signature::{self, RsaPublicKeyComponents};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{env, error::Error, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, env, error::Error, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::OnceCell;
 use tower_http::{
@@ -215,6 +215,18 @@ struct GenerateLearningModuleRequest {
     pace: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PriorLearningLesson {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    checkpoint_question: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    code_lens: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct GenerateLearningLessonRequest {
     #[serde(default)]
@@ -232,6 +244,8 @@ struct GenerateLearningLessonRequest {
     background: String,
     pace: String,
     lesson_index: usize,
+    #[serde(default)]
+    prior_lessons: Vec<PriorLearningLesson>,
 }
 
 impl GenerateLearningLessonRequest {
@@ -2252,8 +2266,13 @@ impl OpenAiClient {
         request: &GenerateLearningModuleRequest,
     ) -> Result<LearningModule, ApiError> {
         let mut lessons = Vec::with_capacity(5);
+        let mut prior_lessons = Vec::with_capacity(5);
         for lesson_index in 0..5 {
-            lessons.push(self.generate_learning_lesson(request, lesson_index).await?);
+            let lesson = self
+                .generate_learning_lesson(request, lesson_index, &prior_lessons)
+                .await?;
+            prior_lessons.push(prior_learning_lesson_from_compact(&lesson));
+            lessons.push(lesson);
         }
         let compact = AiLearningModuleCompact {
             t: learning_module_title(request),
@@ -2267,8 +2286,11 @@ impl OpenAiClient {
         &self,
         request: &GenerateLearningModuleRequest,
         lesson_index: usize,
+        prior_lessons: &[PriorLearningLesson],
     ) -> Result<LearningLesson, ApiError> {
-        let compact = self.generate_learning_lesson(request, lesson_index).await?;
+        let compact = self
+            .generate_learning_lesson(request, lesson_index, prior_lessons)
+            .await?;
         compact_ai_lesson_to_learning_lesson(
             lesson_index,
             &learning_background_label(request),
@@ -2282,9 +2304,10 @@ impl OpenAiClient {
         &self,
         request: &GenerateLearningModuleRequest,
         lesson_index: usize,
+        prior_lessons: &[PriorLearningLesson],
     ) -> Result<AiLearningLessonCompact, ApiError> {
         match self
-            .request_learning_lesson(request, lesson_index, false)
+            .request_learning_lesson(request, lesson_index, false, prior_lessons)
             .await
         {
             Ok(lesson) => Ok(lesson),
@@ -2302,7 +2325,7 @@ impl OpenAiClient {
                             "AI lesson response failed validation; retrying once with repair contract"
                         );
                         return self
-                            .request_learning_lesson(request, lesson_index, true)
+                            .request_learning_lesson(request, lesson_index, true, prior_lessons)
                             .await;
                     }
                     _ => warn!(%error, lesson_index, "AI lesson generation failed"),
@@ -2317,8 +2340,9 @@ impl OpenAiClient {
         request: &GenerateLearningModuleRequest,
         lesson_index: usize,
         repair: bool,
+        prior_lessons: &[PriorLearningLesson],
     ) -> Result<AiLearningLessonCompact, ApiError> {
-        let prompt = learning_lesson_prompt(request, lesson_index, repair);
+        let prompt = learning_lesson_prompt(request, lesson_index, repair, prior_lessons);
         let lesson_timeout = self.timeout;
         let lesson = self
             .post_openai_json::<AiLearningLessonCompact>(
@@ -2328,7 +2352,12 @@ impl OpenAiClient {
                 lesson_timeout,
             )
             .await?;
-        if let Err(error) = validate_ai_learning_lesson_compact_for_request(request, &lesson) {
+        if let Err(error) = validate_ai_learning_lesson_compact_for_request_with_context(
+            request,
+            &lesson,
+            lesson_index,
+            prior_lessons,
+        ) {
             warn!(
                 lesson_index,
                 title = %clamp_text(lesson.t.clone(), 120),
@@ -3230,7 +3259,11 @@ async fn generate_learning_lesson_endpoint(
 
     let lesson = state
         .openai
-        .generate_learning_lesson_item(&module_request, request.lesson_index)
+        .generate_learning_lesson_item(
+            &module_request,
+            request.lesson_index,
+            &request.prior_lessons,
+        )
         .await?;
 
     Ok(Json(GenerateLearningLessonResponse {
@@ -5286,10 +5319,21 @@ fn build_learning_module_from_compact_ai(
         request.background.trim().to_string()
     };
 
-    let lessons = compact
-        .l
+    let mut prior_lessons = Vec::with_capacity(5);
+    let mut compact_lessons = Vec::with_capacity(5);
+    for (index, lesson) in compact.l.into_iter().take(5).enumerate() {
+        validate_ai_learning_lesson_compact_for_request_with_context(
+            request,
+            &lesson,
+            index,
+            &prior_lessons,
+        )?;
+        prior_lessons.push(prior_learning_lesson_from_compact(&lesson));
+        compact_lessons.push(lesson);
+    }
+
+    let lessons = compact_lessons
         .into_iter()
-        .take(5)
         .enumerate()
         .map(|(index, lesson)| {
             compact_ai_lesson_to_learning_lesson(index, &background, &focus, request, lesson)
@@ -5325,16 +5369,8 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
     let why_words = lesson.w.split_whitespace().count();
     let bridge_words = lesson.j.split_whitespace().count();
 
-    let combined_prose = [
-        lesson.t.as_str(),
-        lesson.e.as_str(),
-        lesson.w.as_str(),
-        lesson.j.as_str(),
-        lesson.f.as_str(),
-        lesson.q.as_str(),
-        lesson.a.as_str(),
-    ]
-    .join("\n");
+    let combined_prose = learning_lesson_prose(lesson);
+    let combined_with_code = learning_lesson_full_text(lesson);
 
     if lesson.t.trim().is_empty()
         || explainer_words < 500
@@ -5345,6 +5381,8 @@ fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Resu
         || lesson.q.trim().is_empty()
         || generic_learning_checkpoint_question(&lesson.q)
         || contains_placeholder_learning_text(&combined_prose)
+        || !lesson_has_official_source_anchor("generic", &combined_with_code)
+        || !lesson_has_accuracy_nuance(&combined_with_code)
         || lesson.a.trim().is_empty()
         || wrong_answer_count != 3
         || wrong_feedback_count != 3
@@ -5359,10 +5397,65 @@ fn validate_ai_learning_lesson_compact_for_request(
     request: &GenerateLearningModuleRequest,
     lesson: &AiLearningLessonCompact,
 ) -> Result<(), ApiError> {
+    validate_ai_learning_lesson_compact_for_request_without_role(request, lesson)
+}
+
+fn validate_ai_learning_lesson_compact_for_request_without_role(
+    request: &GenerateLearningModuleRequest,
+    lesson: &AiLearningLessonCompact,
+) -> Result<(), ApiError> {
     validate_ai_learning_lesson_compact(lesson)?;
 
     let ecosystem_id = learning_ecosystem_id(request);
-    let combined = [
+    let combined = learning_lesson_full_text(lesson).to_ascii_lowercase();
+
+    if !lesson_mentions_required_ecosystem_terms(&ecosystem_id, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+    if !lesson_has_official_source_anchor(&ecosystem_id, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+    if contains_unrequested_ecosystem_leakage(&ecosystem_id, request, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+
+    Ok(())
+}
+
+fn validate_ai_learning_lesson_compact_for_request_with_context(
+    request: &GenerateLearningModuleRequest,
+    lesson: &AiLearningLessonCompact,
+    lesson_index: usize,
+    prior_lessons: &[PriorLearningLesson],
+) -> Result<(), ApiError> {
+    validate_ai_learning_lesson_compact_for_request_without_role(request, lesson)?;
+
+    let ecosystem_id = learning_ecosystem_id(request);
+    let combined = learning_lesson_full_text(lesson).to_ascii_lowercase();
+
+    if !lesson_mentions_role_specific_terms(&ecosystem_id, lesson_index, &combined) {
+        return Err(ApiError::InvalidAiResponse);
+    }
+    validate_no_prior_lesson_redundancy(lesson, prior_lessons)?;
+
+    Ok(())
+}
+
+fn learning_lesson_prose(lesson: &AiLearningLessonCompact) -> String {
+    [
+        lesson.t.as_str(),
+        lesson.e.as_str(),
+        lesson.w.as_str(),
+        lesson.j.as_str(),
+        lesson.f.as_str(),
+        lesson.q.as_str(),
+        lesson.a.as_str(),
+    ]
+    .join("\n")
+}
+
+fn learning_lesson_full_text(lesson: &AiLearningLessonCompact) -> String {
+    [
         lesson.t.as_str(),
         lesson.e.as_str(),
         lesson.s.as_str(),
@@ -5373,16 +5466,401 @@ fn validate_ai_learning_lesson_compact_for_request(
         lesson.a.as_str(),
     ]
     .join("\n")
-    .to_ascii_lowercase();
+}
 
-    if !lesson_mentions_required_ecosystem_terms(&ecosystem_id, &combined) {
-        return Err(ApiError::InvalidAiResponse);
+fn prior_learning_lesson_from_compact(lesson: &AiLearningLessonCompact) -> PriorLearningLesson {
+    PriorLearningLesson {
+        title: clamp_text(lesson.t.clone(), 160),
+        checkpoint_question: clamp_text(lesson.q.clone(), 260),
+        summary: clamp_text(lesson.e.clone(), 1600),
+        code_lens: clamp_text(lesson.s.clone(), 700),
     }
-    if contains_unrequested_ecosystem_leakage(&ecosystem_id, request, &combined) {
-        return Err(ApiError::InvalidAiResponse);
+}
+
+fn lesson_has_official_source_anchor(ecosystem_id: &str, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let source_terms = official_source_terms_for_ecosystem(ecosystem_id);
+    let has_source_name = source_terms.iter().any(|term| lower.contains(term));
+    let source_posture_count = [
+        "official",
+        "docs",
+        "documentation",
+        "standard",
+        "spec",
+        "repository",
+        "source pack",
+        "further study",
+        "verify",
+        "confirm",
+    ]
+    .iter()
+    .filter(|term| lower.contains(**term))
+    .count();
+
+    has_source_name && source_posture_count >= 2
+}
+
+fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static str] {
+    match ecosystem_id {
+        "stacks" => &[
+            "official stacks",
+            "stacks documentation",
+            "docs.stacks.co",
+            "clarity documentation",
+            "sbtc documentation",
+            "bns documentation",
+        ],
+        "zcash" => &[
+            "official zcash",
+            "zcash documentation",
+            "zcash docs",
+            "zip-321",
+            "zip321",
+            "zips.z.cash",
+            "zip-316",
+        ],
+        "ckb" => &[
+            "official ckb",
+            "ckb docs",
+            "docs.nervos.org",
+            "nervos rfc",
+            "ckb documentation",
+        ],
+        "fiber" => &[
+            "fiber network repository",
+            "github.com/nervosnetwork/fiber",
+            "fiber repository",
+            "ckb docs",
+            "official ckb",
+        ],
+        "ckb-fiber" => &[
+            "official ckb",
+            "ckb docs",
+            "fiber network repository",
+            "fiber repository",
+            "joyid",
+        ],
+        "basics" => &[
+            "ethereum developer docs",
+            "mdn web docs",
+            "bitcoin developer reference",
+            "official docs",
+            "official documentation",
+        ],
+        _ => &[
+            "official docs",
+            "official documentation",
+            "official ckb",
+            "ckb docs",
+            "fiber network repository",
+            "zcash documentation",
+            "official zcash",
+            "stacks documentation",
+            "official stacks",
+            "ethereum developer docs",
+            "mdn web docs",
+            "source pack",
+            "standard",
+            "spec",
+        ],
+    }
+}
+
+fn lesson_has_accuracy_nuance(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let verification_terms = [
+        "verify",
+        "validate",
+        "confirm",
+        "evidence",
+        "source",
+        "docs",
+        "spec",
+        "standard",
+        "repository",
+        "proof boundary",
+        "trust boundary",
+    ];
+    let failure_terms = [
+        "failure mode",
+        "denial test",
+        "reject",
+        "unsafe",
+        "wrong",
+        "stale",
+        "replay",
+        "mismatch",
+        "tamper",
+        "attacker",
+        "leak",
+        "malformed",
+    ];
+    let nuance_terms = [
+        "does not automatically",
+        "does not",
+        "not automatically",
+        "not as",
+        "not interchangeable",
+        "do not",
+        "should not",
+        "must not",
+        "cannot",
+        "unless",
+        "only if",
+        "before",
+        "however",
+        "but",
+        "separate",
+        "instead of",
+    ];
+
+    count_terms(&lower, &verification_terms) >= 2
+        && count_terms(&lower, &failure_terms) >= 2
+        && count_terms(&lower, &nuance_terms) >= 2
+}
+
+fn count_terms(text: &str, terms: &[&str]) -> usize {
+    terms.iter().filter(|term| text.contains(**term)).count()
+}
+
+fn lesson_mentions_role_specific_terms(
+    ecosystem_id: &str,
+    lesson_index: usize,
+    text: &str,
+) -> bool {
+    let terms = role_specific_terms(ecosystem_id, lesson_index);
+    if terms.is_empty() {
+        return true;
+    }
+    let required_hits = if terms.len() >= 5 { 2 } else { 1 };
+    count_terms(text, terms) >= required_hits
+}
+
+fn role_specific_terms(ecosystem_id: &str, lesson_index: usize) -> &'static [&'static str] {
+    match (ecosystem_id, lesson_index.min(4)) {
+        ("zcash", 0) => &["shielded", "checkout", "privacy", "address", "payment"],
+        ("zcash", 1) => &[
+            "zip-321",
+            "zip321",
+            "payment request",
+            "recipient",
+            "amount",
+            "network",
+        ],
+        ("zcash", 2) => &["viewing key", "memo", "disclosure", "privacy", "address"],
+        ("zcash", 3) => &[
+            "denial",
+            "malformed",
+            "replay",
+            "wrong-network",
+            "wrong network",
+            "transparent",
+            "unsafe",
+        ],
+        ("zcash", 4) => &[
+            "quest",
+            "verifier",
+            "denial test",
+            "payment evidence",
+            "completion",
+        ],
+        ("stacks", 0) => &[
+            "bitcoin",
+            "proof of transfer",
+            "stacks block",
+            "settlement",
+            "transaction",
+        ],
+        ("stacks", 1) => &[
+            "clarity",
+            "public function",
+            "principal",
+            "post-condition",
+            "map",
+        ],
+        ("stacks", 2) => &[
+            "wallet",
+            "signature",
+            "transaction",
+            "authorization",
+            "frontend",
+        ],
+        ("stacks", 3) => &["sbtc", "bns", "bitcoin-backed", "name", "identity"],
+        ("stacks", 4) => &["quest", "clarity", "denial test", "authorization", "proof"],
+        ("ckb", 0) => &["cell", "live cell", "capacity", "state"],
+        ("ckb", 1) => &["outpoint", "input", "output", "transaction"],
+        ("ckb", 2) => &["script", "witness", "lock", "type"],
+        ("ckb", 3) => &["denial", "stale", "copied", "replay", "fake"],
+        ("ckb", 4) => &["quest", "verifier", "evidence", "denial test"],
+        ("fiber", 0) => &["channel", "settlement", "payment", "ckb"],
+        ("fiber", 1) => &["invoice", "ptlc", "preimage", "route", "channel state"],
+        ("fiber", 2) => &["receipt", "paid", "replay", "access"],
+        ("fiber", 3) => &["amount", "balance", "payout", "integrity"],
+        ("fiber", 4) => &["quest", "verifier", "denial test", "payment"],
+        ("basics", 0) => &["blockchain", "block", "shared history", "node"],
+        ("basics", 1) => &[
+            "wallet",
+            "address",
+            "recovery phrase",
+            "signature",
+            "private key",
+        ],
+        ("basics", 2) => &["transaction", "fee", "confirmation", "explorer", "mempool"],
+        ("basics", 3) => &["connect wallet", "approve", "network", "phishing", "prompt"],
+        ("basics", 4) => &["quest", "denial test", "wallet", "transaction", "safety"],
+        ("ckb-fiber", 0) => &["ckb", "fiber", "cell", "channel", "evidence"],
+        ("ckb-fiber", 1) => &["outpoint", "invoice", "transaction", "payment"],
+        ("ckb-fiber", 2) => &["script", "witness", "signature", "joyid"],
+        ("ckb-fiber", 3) => &["denial", "stale", "replay", "mismatch"],
+        ("ckb-fiber", 4) => &["quest", "verifier", "denial test", "proof"],
+        _ => &[],
+    }
+}
+
+fn validate_no_prior_lesson_redundancy(
+    lesson: &AiLearningLessonCompact,
+    prior_lessons: &[PriorLearningLesson],
+) -> Result<(), ApiError> {
+    if prior_lessons.is_empty() {
+        return Ok(());
+    }
+
+    let new_title = normalized_fingerprint(&lesson.t);
+    let new_checkpoint = normalized_fingerprint(&lesson.q);
+    let new_code = normalized_fingerprint(&lesson.s);
+    let new_explanation = redundancy_body_text(&lesson.e);
+    let new_text = format!("{}\n{}\n{}", lesson.t, new_explanation, lesson.q);
+    let new_tokens = significant_token_set(&new_text);
+    let new_shingles = normalized_shingles(&new_explanation, 9);
+
+    for prior in prior_lessons.iter().take(4) {
+        let prior_title = normalized_fingerprint(&prior.title);
+        let prior_checkpoint = normalized_fingerprint(&prior.checkpoint_question);
+        let prior_code = normalized_fingerprint(&prior.code_lens);
+
+        if !new_title.is_empty() && new_title == prior_title {
+            return Err(ApiError::InvalidAiResponse);
+        }
+        if !new_checkpoint.is_empty() && new_checkpoint == prior_checkpoint {
+            return Err(ApiError::InvalidAiResponse);
+        }
+        if new_code.chars().count() > 30 && new_code == prior_code {
+            return Err(ApiError::InvalidAiResponse);
+        }
+
+        let prior_summary = redundancy_body_text(&prior.summary);
+        let prior_text = format!(
+            "{}\n{}\n{}",
+            prior.title, prior_summary, prior.checkpoint_question
+        );
+        let prior_tokens = significant_token_set(&prior_text);
+        let overlap = token_overlap_ratio(&new_tokens, &prior_tokens);
+        let repeated_shingles =
+            common_shingle_count(&new_shingles, &normalized_shingles(&prior_summary, 9));
+
+        if overlap > 0.78 || (overlap > 0.62 && repeated_shingles >= 3) {
+            return Err(ApiError::InvalidAiResponse);
+        }
     }
 
     Ok(())
+}
+
+fn redundancy_body_text(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut cutoff = value.len();
+    for marker in ["accuracy check:", "further study:"] {
+        if let Some(index) = lower.find(marker) {
+            cutoff = cutoff.min(index);
+        }
+    }
+    value[..cutoff].trim().to_string()
+}
+
+fn normalized_fingerprint(value: &str) -> String {
+    significant_tokens(value).join(" ")
+}
+
+fn significant_token_set(value: &str) -> BTreeSet<String> {
+    significant_tokens(value).into_iter().collect()
+}
+
+fn significant_tokens(value: &str) -> Vec<String> {
+    value
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .map(str::trim)
+        .filter(|token| token.chars().count() > 2 && !is_learning_stopword(token))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_learning_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "from"
+            | "into"
+            | "before"
+            | "after"
+            | "must"
+            | "should"
+            | "could"
+            | "would"
+            | "about"
+            | "because"
+            | "through"
+            | "which"
+            | "what"
+            | "when"
+            | "where"
+            | "your"
+            | "their"
+            | "there"
+            | "then"
+            | "than"
+            | "only"
+            | "also"
+            | "lesson"
+            | "module"
+            | "generated"
+            | "learner"
+            | "learners"
+            | "code"
+            | "field"
+            | "fields"
+            | "value"
+            | "values"
+    )
+}
+
+fn token_overlap_ratio(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f32 {
+    let denominator = left.len().min(right.len());
+    if denominator == 0 {
+        return 0.0;
+    }
+    let shared = left.intersection(right).count();
+    shared as f32 / denominator as f32
+}
+
+fn normalized_shingles(value: &str, size: usize) -> BTreeSet<String> {
+    let tokens = significant_tokens(value);
+    if tokens.len() < size {
+        return BTreeSet::new();
+    }
+    tokens
+        .windows(size)
+        .map(|window| window.join(" "))
+        .collect::<BTreeSet<_>>()
+}
+
+fn common_shingle_count(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right).count()
 }
 
 fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> bool {
@@ -5408,6 +5886,9 @@ fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> b
         "ckb" => &["ckb", "cell", "outpoint", "script", "witness", "capacity"],
         "fiber" => &[
             "fiber", "channel", "invoice", "ptlc", "preimage", "route", "receipt",
+        ],
+        "ckb-fiber" => &[
+            "ckb", "fiber", "cell", "outpoint", "script", "witness", "invoice", "channel", "joyid",
         ],
         "basics" => &[
             "blockchain",
@@ -5471,6 +5952,15 @@ fn contains_unrequested_ecosystem_leakage(
             "bns",
         ],
         "fiber" => &[
+            "zip-321",
+            "zatoshi",
+            "orchard",
+            "shielded address",
+            "clarity",
+            "sbtc",
+            "bns",
+        ],
+        "ckb-fiber" => &[
             "zip-321",
             "zatoshi",
             "orchard",
@@ -5565,7 +6055,7 @@ fn compact_ai_lesson_to_learning_lesson(
     request: &GenerateLearningModuleRequest,
     lesson: AiLearningLessonCompact,
 ) -> Result<LearningLesson, ApiError> {
-    validate_ai_learning_lesson_compact_for_request(request, &lesson)?;
+    validate_ai_learning_lesson_compact_for_request_with_context(request, &lesson, index, &[])?;
 
     let title = lesson.t.trim().to_string();
     let why_it_matters = lesson.w.trim().to_string();
@@ -6224,6 +6714,7 @@ fn learning_lesson_prompt(
     request: &GenerateLearningModuleRequest,
     lesson_index: usize,
     repair: bool,
+    prior_lessons: &[PriorLearningLesson],
 ) -> String {
     let nonce = Uuid::new_v4();
     let interests = request
@@ -6259,10 +6750,11 @@ fn learning_lesson_prompt(
         "s is one matching TypeScript/Rust code lens line."
     };
     let repair_directive = if repair {
-        "The previous lesson was rejected because it was short, generic, incomplete, placeholder-like, or did not name concrete proof-boundary fields. Return a complete lesson this time: the e field alone must be at least 560 words and must teach with concrete examples, failure cases, official-resource guidance, and no filler."
+        "The previous lesson was rejected because it was short, generic, incomplete, repetitive, inaccurate-looking, weakly sourced, or did not name concrete proof-boundary fields. Return a complete lesson this time: the e field alone must be at least 560 words and must teach with concrete examples, failure cases, official-resource guidance, and no filler."
     } else {
         ""
     };
+    let prior_lesson_context = prior_lesson_context_directive(prior_lessons);
 
     format!(
         r#"Return minified JSON only with keys exactly: t,e,s,w,j,f,q,a,b,bf,ci. No markdown or prose outside JSON.
@@ -6270,8 +6762,11 @@ fn learning_lesson_prompt(
 VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}. Learner goal: {goal}. Speciality: {background}. Pace: {pace}. Focus: {focus_directive}. Speciality lens: {speciality_directive}. {repair_directive}
 
 {source_grounding_directive}
+{prior_lesson_context}
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, or Proof of Transfer. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+Global VibeQuest accuracy standard: teach as if a reviewer will compare every claim against the official source pack. Separate protocol evidence from app state. Name the exact verification boundary, one edge case, one denial test, and one nuance where a common shortcut would be wrong. Do not repeat a prior module's title, opening, checkpoint, code lens, or proof boundary.
+
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, or Proof of Transfer. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -6281,7 +6776,33 @@ e must be at least 520 words of real teaching prose with paragraphs. Define the 
         source_grounding_directive = learning_source_grounding_directive(request),
         speciality_directive = learning_speciality_directive(background),
         code_snippet_directive = code_snippet_directive,
+        prior_lesson_context = prior_lesson_context,
     )
+}
+
+fn prior_lesson_context_directive(prior_lessons: &[PriorLearningLesson]) -> String {
+    let prior = prior_lessons
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, lesson)| {
+            format!(
+                "Prior module {}: title='{}'; checkpoint='{}'",
+                index + 1,
+                clamp_text(lesson.title.clone(), 80),
+                clamp_text(lesson.checkpoint_question.clone(), 120)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if prior.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Already generated modules for this course: {}. The next module must advance the path, use a different concrete failure mode, and avoid repeated wording.",
+            prior.join(" | ")
+        )
+    }
 }
 
 fn code_tutor_prompt(request: &CodeTutorRequest) -> String {
@@ -7046,19 +7567,63 @@ mod tests {
             background: "Backend dev".to_string(),
             pace: "Deep dive".to_string(),
         };
-        let lesson_body = "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace how the wallet address, challenge nonce, domain, action name, CKB cell reference, and Fiber channel request are assembled before signature verification. The important detail is that JoyID makes the signing experience feel simple, but the verifier still has to decide what the user actually approved. A passkey signature proves control of a signer; it does not automatically prove that the same signer approved this run, this route, this invoice, or this generated code path. CKB adds another boundary because cells, scripts, witnesses, and transaction evidence describe state in a way a frontend payload cannot replace. Fiber adds a payment boundary because channel state and invoice proof must be scoped to the content, amount, and settlement expectation. The failure mode is subtle: a vibe-coded route may check that a signature exists while letting the same signed text approve another payout, channel action, or generated quest run. A stronger verifier binds the challenge to the current run, refuses stale nonces, records which proof was consumed, and checks that the CKB or Fiber evidence being trusted is the evidence named in the signed message. The denial test should copy a valid signature into a request with a different run id, CKB cell, Fiber invoice, or action name and prove the backend rejects it before any badge or reward state changes. That test teaches the learner to read generated code by asking what exact proof boundary the code defends, not whether the UI looks authenticated. The practical review habit is to read the generated function from the accepting return statement backward. Every value that makes the function return true should come from either the signed JoyID message, the CKB transaction evidence, or the Fiber payment state. If a value appears only in request JSON, the learner should treat it as attacker-controlled until a denial test proves otherwise. The module then extends into a submodule path for implementation review: first inventory every accepted field, then mark whether that field came from a signed challenge, a CKB transaction, a Fiber invoice, or only a database row. The next submodule asks the learner to trace runtime ownership. A verifier that reads user_id from session state still has to prove the signed action, cell, invoice, amount, nonce, and route belong to the same operation. The final submodule turns that map into tests. One valid case should contain the exact signed payload and matching protocol evidence. Three denial cases should mutate the run id, the referenced cell, and the invoice amount. This gives the learner a repeatable audit habit instead of a memorized answer. Further study should connect this exercise to official CKB transaction documentation, Fiber invoice/channel-state behavior, and JoyID challenge signing rules. The learner should finish able to explain why a successful UI callback, a saved database flag, and a copied invoice string are not interchangeable with protocol-bound evidence verified on the server.";
+        let ckb_fiber_body = |role: &str| -> String {
+            format!(
+                "{} Accuracy check: verify each claim against official CKB docs, the Fiber Network repository, and JoyID signing guidance before trusting the generated verifier. Submodule path: source claim inventory -> protocol evidence map -> app state denial -> regression test. Further study: read official CKB transaction documentation, the Fiber Network repository, and JoyID challenge signing rules.",
+                role.repeat(12)
+            )
+        };
+        let lesson_specs = [
+            (
+                "CKB/Fiber evidence inventory",
+                "Backend checks should treat a JoyID-signed payload as evidence for one exact action, not as a reusable login token. In a CKB/Fiber flow, the learner should trace the CKB cell, Fiber channel, wallet address, challenge nonce, domain, action name, and evidence source before signature verification. The failure mode is subtle: a vibe-coded route may accept a database flag while the protocol evidence belongs to another cell or channel. The denial test should reject unsafe mismatches between CKB state and Fiber channel evidence. ",
+                "const evidence = bindCkbCellToFiberChannel({ cell, channel, nonce });",
+                "Which CKB cell, Fiber channel, nonce, and evidence source must be bound before accepting the first proof boundary?",
+                "The exact CKB cell, Fiber channel evidence, nonce, signer, and server-side source of truth",
+            ),
+            (
+                "OutPoint and invoice lineage",
+                "A backend verifier must keep OutPoint lineage separate from an invoice string because a transaction input, output, amount, payment request, and Fiber payment route do not prove the same thing automatically. The common shortcut is to store an invoice as paid and forget to verify the CKB transaction evidence tied to the same run. The denial test mutates the OutPoint, invoice amount, transaction hash, or payment context and expects a hard reject before user progress changes. ",
+                "const ok = verifyOutPointInvoicePair({ outPoint, invoice, amount, txHash });",
+                "Which OutPoint, invoice, transaction, payment amount, and run id fields prevent copied payment lineage?",
+                "The exact OutPoint, invoice amount, transaction context, payment route, and run id",
+            ),
+            (
+                "Script witness and JoyID signature scope",
+                "Generated code should not collapse script execution, witness parsing, and JoyID signature verification into one vague authenticated flag. A lock script, type script, witness, signer challenge, and action scope each answer a different verification question. The unsafe failure mode is a valid signature replayed over a request whose witness or script group changed. The denial test changes the witness, script hash, JoyID challenge, or action label and requires the verifier to reject the request. ",
+                "const signed = verifyJoyIDWitnessScope({ scriptHash, witness, challenge, signature });",
+                "Which script, witness, signature, and JoyID challenge fields prove the user approved this exact action?",
+                "The script hash, parsed witness, exact JoyID challenge, signature, nonce, and action scope",
+            ),
+            (
+                "Stale proof and replay denial",
+                "The pragmatic audit question is not whether the happy path works but whether stale, copied, replayed, or mismatched proof material fails before state changes. CKB/Fiber apps are vulnerable when generated code accepts old channel state, an old witness, or a copied invoice because the frontend says the learner finished. The denial test mutates stale channel state, replay nonce, copied witness, and mismatched signer context until the verifier proves it rejects unsafe reuse. ",
+                "const denied = rejectReplay({ nonce, witness, channelState, signer, runId });",
+                "Which stale, replayed, copied, or mismatched CKB/Fiber fields must fail the denial path?",
+                "The stale witness, replay nonce, copied invoice proof, mismatched channel state, and wrong run id",
+            ),
+            (
+                "Verifier quest proof package",
+                "The final module turns the learning into a quest artifact: a verifier, source-grounded proof map, denial test suite, and explanation of why the proof cannot be faked by frontend state. The learner must show which CKB evidence, Fiber payment proof, JoyID signature, server run id, and completion state are authoritative. The failure case is accepting a quest result when a copied proof package passes visual checks but fails official-source verification. ",
+                "const questReady = verifyQuestProofPackage({ proofMap, denialTests, sourcePack });",
+                "Which verifier, denial test, proof package, and official source evidence make the final quest safe?",
+                "The verifier output, passing denial tests, official source map, proof package, and server-owned completion state",
+            ),
+        ];
         let compact = AiLearningModuleCompact {
             t: "CKB Fiber JoyID from vibecoded code".to_string(),
-            l: (0..5)
-                .map(|index| AiLearningLessonCompact {
-                    t: format!("Module {index} Verify CKB/Fiber proof"),
-                    e: lesson_body.to_string(),
-                    s: "const ok = await verifyJoyIDSignature({ message, signature, address });".to_string(),
-                    w: "For a backend developer, this matters because generated wallet code often confuses signer presence with authorization. The lesson forces the learner to connect JoyID proof, CKB state evidence, Fiber payment context, and denial tests before trusting a generated verifier.".to_string(),
+            l: lesson_specs
+                .iter()
+                .enumerate()
+                .map(|(index, (title, body, code, question, answer))| AiLearningLessonCompact {
+                    t: (*title).to_string(),
+                    e: ckb_fiber_body(body),
+                    s: (*code).to_string(),
+                    w: "For a backend developer, this matters because generated wallet and payment code can confuse signer presence with authorization. The lesson forces the learner to connect JoyID proof, CKB state evidence, Fiber payment context, source checks, and denial tests before trusting a generated verifier.".to_string(),
                     j: "Generate a verifier quest that binds JoyID challenge fields to CKB cell evidence and Fiber invoice context, then rejects replayed run ids or mismatched payment state.".to_string(),
-                    f: "Which signed field would you mutate first to prove the authorization cannot be replayed?".to_string(),
-                    q: "What must the backend verify before trusting a JoyID-authorized Fiber request?".to_string(),
-                    a: "JoyID signature over the exact challenge payload and action context".to_string(),
+                    f: "Which signed or protocol field would you mutate first to prove the verifier rejects unsafe reuse?".to_string(),
+                    q: (*question).to_string(),
+                    a: (*answer).to_string(),
                     b: vec!["CSS theme".to_string(), "Gas price chart".to_string(), "Frontend route".to_string()],
                     bf: vec![
                         "Visual styling does not prove signer intent, CKB state, or Fiber payment context.".to_string(),
@@ -7069,6 +7634,18 @@ mod tests {
                 })
                 .collect(),
         };
+
+        let mut prior_lessons = Vec::new();
+        for (index, lesson) in compact.l.iter().enumerate() {
+            validate_ai_learning_lesson_compact_for_request_with_context(
+                &request,
+                lesson,
+                index,
+                &prior_lessons,
+            )
+            .unwrap_or_else(|error| panic!("lesson {index} failed validation: {error:?}"));
+            prior_lessons.push(prior_learning_lesson_from_compact(lesson));
+        }
 
         let module = build_learning_module_from_compact_ai(&request, compact).unwrap();
 
@@ -7083,7 +7660,7 @@ mod tests {
         assert!(
             module.lessons[0]
                 .explanation
-                .contains("verifyJoyIDSignature")
+                .contains("bindCkbCellToFiberChannel")
         );
         assert_eq!(module.lessons[0].checkpoint.options.len(), 4);
         assert!(
@@ -7095,9 +7672,9 @@ mod tests {
     }
 
     fn quality_gate_test_lesson() -> AiLearningLessonCompact {
-        let sentence = "A Zcash shielded checkout verifier must bind the ZIP-321 request, zatoshi amount, shielded address, memo policy, viewing-key boundary, confirmation depth, and network before generated code marks an order as paid. ";
+        let sentence = "A Zcash shielded checkout verifier must bind the ZIP-321 request, zatoshi amount, shielded address, memo policy, viewing-key boundary, confirmation depth, and network before generated code marks an order as paid. It must reject unsafe malformed requests, wrong-network recipients, replayed evidence, and mismatched payment state instead of trusting frontend state. ";
         let body = format!(
-            "{} Submodule path: request parsing -> address policy -> memo safety -> denial tests. Further study: read the official Zcash documentation and ZIP-321 payment request standard.",
+            "{} Accuracy check: verify each claim against the official Zcash documentation and ZIP-321 payment request standard before shipping the generated checkout verifier. Submodule path: request parsing -> address policy -> memo safety -> denial tests. Further study: read the official Zcash documentation and ZIP-321 payment request standard.",
             sentence.repeat(72)
         );
 
@@ -7140,6 +7717,49 @@ mod tests {
 
         assert!(lesson.s.contains("TODO"));
         assert!(validate_ai_learning_lesson_compact(&lesson).is_ok());
+    }
+
+    #[test]
+    fn ai_learning_quality_rejects_unsourced_lesson_claims() {
+        let mut lesson = quality_gate_test_lesson();
+        lesson.e = lesson
+            .e
+            .replace(
+                "official Zcash documentation and ZIP-321 payment request standard",
+                "popular blog posts",
+            )
+            .replace(
+                "official Zcash documentation and ZIP-321 payment request standard",
+                "community notes",
+            );
+
+        assert!(validate_ai_learning_lesson_compact(&lesson).is_err());
+    }
+
+    #[test]
+    fn progressive_learning_rejects_redundant_prior_lessons() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("zcash-shielded-payments".to_string()),
+            ecosystem_id: Some("zcash".to_string()),
+            topic: Some("ZIP-321 shielded checkout".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Understand the trust boundary".to_string()],
+            interests: vec!["Zcash Shielded Payments".to_string()],
+            learner_goal: "Understand Zcash shielded checkout denial cases".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Deep dive".to_string(),
+        };
+        let lesson = quality_gate_test_lesson();
+        let prior = vec![prior_learning_lesson_from_compact(&lesson)];
+        let mut repeated = quality_gate_test_lesson();
+        repeated.t = "ZIP-321 shielded checkout trust boundary repeated".to_string();
+
+        assert!(
+            validate_ai_learning_lesson_compact_for_request_with_context(
+                &request, &repeated, 1, &prior,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -7242,11 +7862,11 @@ mod tests {
             background: "Frontend dev".to_string(),
             pace: "Focused".to_string(),
         };
-        let sentence = "A Stacks app should treat the wallet signature, submitted transaction, Clarity contract call, principal, post-condition, BNS name resolution, and sBTC flow as separate pieces of evidence instead of assuming a frontend button proves completion. ";
+        let sentence = "A Stacks app should treat the wallet signature, submitted transaction, Clarity contract call, principal, post-condition, BNS name resolution, and sBTC flow as separate pieces of evidence instead of assuming a frontend button proves completion. It must reject unsafe mismatches, replayed authorization, stale transaction status, and malformed app state before progress changes. ";
         let lesson = AiLearningLessonCompact {
             t: "Stacks Clarity authorization boundary".to_string(),
             e: format!(
-                "{} Submodule path: wallet connect -> Clarity public function -> post-condition review -> explorer evidence -> denial tests. Further study: read the official Stacks documentation for Clarity, transactions, wallets, sBTC, and BNS.",
+                "{} Accuracy check: verify each claim against the official Stacks documentation for Clarity, transactions, wallets, sBTC, and BNS before trusting generated app logic. Submodule path: wallet connect -> Clarity public function -> post-condition review -> explorer evidence -> denial tests. Further study: read the official Stacks documentation for Clarity, transactions, wallets, sBTC, and BNS.",
                 sentence.repeat(72)
             ),
             s: "(define-public (claim (owner principal))\n  ;; TODO: require the expected principal and post-condition before accepting\n  (ok owner))".to_string(),
