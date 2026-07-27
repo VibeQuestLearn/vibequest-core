@@ -5700,7 +5700,7 @@ fn compact_tutor_messages(messages: Vec<LearningTutorMessage>) -> Vec<LearningTu
 }
 
 fn compact_learning_module(mut module: LearningModule) -> Result<LearningModule, ApiError> {
-    module.title = clamp_text(module.title, 80);
+    module.title = clamp_text(clean_learning_module_title(&module.title), 80);
     module.learner_profile = clamp_text(module.learner_profile, 180);
     module.outcome = clamp_text(module.outcome, 220);
     module.capstone_quest_prompt = clamp_text(module.capstone_quest_prompt, 360);
@@ -6197,10 +6197,7 @@ fn build_learning_module_from_compact_ai(
         .collect::<Result<Vec<_>, _>>()?;
 
     compact_learning_module(LearningModule {
-        title: non_empty_or(
-            compact.t,
-            &format!("VibeQuest: {} Deep Dive", clamp_text(focus.clone(), 52)),
-        ),
+        title: non_empty_or(compact.t, &learning_module_title(request)),
         learner_profile: learning_module_profile(request),
         outcome: learning_module_outcome(request),
         lessons,
@@ -7322,10 +7319,67 @@ fn learning_intent_label(request: &GenerateLearningModuleRequest) -> String {
 }
 
 fn learning_module_title(request: &GenerateLearningModuleRequest) -> String {
-    format!(
-        "VibeQuest: {} Deep Dive",
-        clamp_text(learning_focus_label(request), 52)
-    )
+    let focus = remove_duplicate_ecosystem_prefix(
+        &learning_focus_label(request),
+        learning_ecosystem_label(request),
+    );
+    format!("{} Deep Dive", clamp_text(focus, 64))
+}
+
+fn clean_learning_module_title(raw: &str) -> String {
+    let mut title = raw.trim();
+    let lower = title.to_ascii_lowercase();
+    if lower.starts_with("vibequest:") {
+        title = title["vibequest:".len()..].trim();
+    } else if lower.starts_with("vibequest -") {
+        title = title["vibequest -".len()..].trim();
+    } else if lower.starts_with("vibequest —") {
+        title = title["vibequest —".len()..].trim();
+    }
+
+    let mut cleaned = title.to_string();
+    for ecosystem in [
+        "Stacks",
+        "Zcash",
+        "CKB",
+        "Fiber",
+        "CKB/Fiber",
+        "Web3 + Blockchain",
+        "Web3 + Blockchain Basics",
+    ] {
+        cleaned = remove_duplicate_ecosystem_prefix(&cleaned, ecosystem);
+    }
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "Learning Track".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn remove_duplicate_ecosystem_prefix(raw: &str, ecosystem: &str) -> String {
+    let trimmed = raw.trim();
+    let prefix = format!("{}:", ecosystem);
+    if !trimmed
+        .to_ascii_lowercase()
+        .starts_with(&prefix.to_ascii_lowercase())
+    {
+        return trimmed.to_string();
+    }
+
+    let after_prefix = trimmed[prefix.len()..].trim_start();
+    let lower_after = after_prefix.to_ascii_lowercase();
+    let lower_ecosystem = ecosystem.to_ascii_lowercase();
+    if lower_after == lower_ecosystem
+        || lower_after.starts_with(&format!("{} ", lower_ecosystem))
+        || lower_after.starts_with(&format!("{}:", lower_ecosystem))
+        || lower_after.starts_with(&format!("{} -", lower_ecosystem))
+        || lower_after.starts_with(&format!("{} —", lower_ecosystem))
+    {
+        after_prefix.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn learning_focus_label(request: &GenerateLearningModuleRequest) -> String {
@@ -8744,6 +8798,31 @@ mod tests {
                 &request, &repeated, 1, &prior,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn learning_module_titles_do_not_use_product_prefix() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("stacks-builder-basics".to_string()),
+            ecosystem_id: Some("stacks".to_string()),
+            topic: Some("Stacks and Bitcoin mental model".to_string()),
+            learning_profile: Some("Builder".to_string()),
+            learning_intents: vec!["Understand Stacks settlement boundaries".to_string()],
+            interests: Vec::new(),
+            learner_goal: "Understand how Stacks apps relate to Bitcoin evidence".to_string(),
+            background: "Builder".to_string(),
+            pace: "Deep dive".to_string(),
+        };
+
+        let title = learning_module_title(&request);
+        assert_eq!(title, "Stacks and Bitcoin mental model Deep Dive");
+        assert!(!title.starts_with("VibeQuest:"));
+        assert_eq!(
+            clean_learning_module_title(
+                "VibeQuest: Stacks: Stacks and Bitcoin mental model Deep Dive"
+            ),
+            "Stacks and Bitcoin mental model Deep Dive"
         );
     }
 
