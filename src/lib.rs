@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, patch, post},
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -499,6 +499,8 @@ struct LearningSessionDocument {
     active_lesson_index: i64,
     checkpoint_answers: Document,
     tutor_messages: Vec<LearningTutorMessage>,
+    #[serde(default = "active_learning_session_status")]
+    status: String,
     created_at: BsonDateTime,
     updated_at: BsonDateTime,
 }
@@ -544,9 +546,18 @@ struct SaveLearningSessionResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct LearningSessionMutationResponse {
+    module_id: String,
+    archived: bool,
+    deleted: bool,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct LearningSessionRecord {
     module_id: String,
     user_id: String,
+    status: String,
     provider: String,
     email: Option<String>,
     name: Option<String>,
@@ -1394,7 +1405,7 @@ impl MongoStore {
         let document = self
             .learning_sessions()
             .await?
-            .find_one(doc! { "user_id": user_id })
+            .find_one(doc! { "user_id": user_id, "status": { "$ne": "archived" } })
             .sort(doc! { "updated_at": -1 })
             .await?;
 
@@ -1416,7 +1427,7 @@ impl MongoStore {
         let mut cursor = self
             .learning_sessions()
             .await?
-            .find(doc! { "user_id": user_id })
+            .find(doc! { "user_id": user_id, "status": { "$ne": "archived" } })
             .sort(doc! { "updated_at": -1 })
             .limit(50)
             .await?;
@@ -1479,6 +1490,7 @@ impl MongoStore {
             active_lesson_index: request.active_lesson_index.min(20) as i64,
             checkpoint_answers: checkpoint_answers_document(request.checkpoint_answers),
             tutor_messages: compact_tutor_messages(request.tutor_messages),
+            status: "active".to_string(),
             created_at,
             updated_at: now,
         };
@@ -1489,6 +1501,53 @@ impl MongoStore {
             .await?;
 
         Ok(document.into())
+    }
+
+    async fn archive_learning_session(
+        &self,
+        user_id: &str,
+        module_id: &str,
+    ) -> Result<bool, ApiError> {
+        let user_id = user_id.trim();
+        let module_id = module_id.trim();
+        if user_id.is_empty() || module_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Err(ApiError::DatabaseUnavailable);
+        }
+
+        let result = self
+            .learning_sessions()
+            .await?
+            .update_one(
+                doc! { "_id": module_id, "user_id": user_id },
+                doc! { "$set": { "status": "archived", "updated_at": BsonDateTime::now() } },
+            )
+            .await?;
+        Ok(result.matched_count > 0)
+    }
+
+    async fn delete_learning_session(
+        &self,
+        user_id: &str,
+        module_id: &str,
+    ) -> Result<bool, ApiError> {
+        let user_id = user_id.trim();
+        let module_id = module_id.trim();
+        if user_id.is_empty() || module_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Err(ApiError::DatabaseUnavailable);
+        }
+
+        let result = self
+            .learning_sessions()
+            .await?
+            .delete_one(doc! { "_id": module_id, "user_id": user_id })
+            .await?;
+        Ok(result.deleted_count > 0)
     }
 
     async fn append_tutor_exchange(
@@ -1844,6 +1903,18 @@ impl From<QuestRunDocument> for QuestRunRecord {
     }
 }
 
+fn active_learning_session_status() -> String {
+    "active".to_string()
+}
+
+fn normalized_learning_session_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "archived" => "archived".to_string(),
+        "completed" => "completed".to_string(),
+        _ => "active".to_string(),
+    }
+}
+
 impl From<LearningSessionDocument> for LearningSessionRecord {
     fn from(session: LearningSessionDocument) -> Self {
         let user_id = if session.user_id.trim().is_empty() {
@@ -1854,6 +1925,7 @@ impl From<LearningSessionDocument> for LearningSessionRecord {
         Self {
             module_id: session.id,
             user_id,
+            status: normalized_learning_session_status(&session.status),
             provider: session.provider,
             email: session.email,
             name: session.name,
@@ -2105,6 +2177,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api_get_learning_session).post(api_save_learning_session),
         )
         .route("/ai/learning/sessions", get(api_list_learning_sessions))
+        .route(
+            "/ai/learning/sessions/{module_id}",
+            delete(api_delete_learning_session),
+        )
+        .route(
+            "/ai/learning/sessions/{module_id}/archive",
+            patch(api_archive_learning_session),
+        )
         .route("/ai/learning/quest", post(generate_learning_quest))
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
@@ -3417,6 +3497,100 @@ async fn api_list_learning_sessions(
         }
         Err(_) => Ok(Json(LearningSessionsResponse {
             sessions: Vec::new(),
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_archive_learning_session(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<LearningSessionMutationResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state
+            .store
+            .archive_learning_session(&principal.user_id, &module_id),
+    )
+    .await
+    {
+        Ok(Ok(archived)) => Ok(Json(LearningSessionMutationResponse {
+            module_id,
+            archived,
+            deleted: false,
+            persistence: PersistenceStatus {
+                saved: archived,
+                warning: None,
+            },
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session archive is degraded");
+            Ok(Json(LearningSessionMutationResponse {
+                module_id,
+                archived: false,
+                deleted: false,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningSessionMutationResponse {
+            module_id,
+            archived: false,
+            deleted: false,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_delete_learning_session(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<LearningSessionMutationResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state
+            .store
+            .delete_learning_session(&principal.user_id, &module_id),
+    )
+    .await
+    {
+        Ok(Ok(deleted)) => Ok(Json(LearningSessionMutationResponse {
+            module_id,
+            archived: false,
+            deleted,
+            persistence: PersistenceStatus {
+                saved: deleted,
+                warning: None,
+            },
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session delete is degraded");
+            Ok(Json(LearningSessionMutationResponse {
+                module_id,
+                archived: false,
+                deleted: false,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningSessionMutationResponse {
+            module_id,
+            archived: false,
+            deleted: false,
             persistence: PersistenceStatus {
                 saved: false,
                 warning: Some(learning_persistence_degraded_warning()),
