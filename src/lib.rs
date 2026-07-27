@@ -38,7 +38,13 @@ use ring::signature::{self, RsaPublicKeyComponents};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, env, error::Error, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    error::Error,
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::sync::OnceCell;
 use tower_http::{
@@ -283,6 +289,7 @@ struct GenerateLearningLessonResponse {
     resources: Vec<LearningResource>,
     lesson: LearningLesson,
     lesson_index: usize,
+    module_status: LearningModuleGenerationState,
     warning: Option<String>,
 }
 
@@ -364,6 +371,31 @@ struct LearningQualityScore {
     placeholder_free: bool,
     ecosystem_alignment: bool,
     passed: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct LearningModuleValidationState {
+    source_grounding: bool,
+    technical_depth: bool,
+    placeholder_free: bool,
+    repetition_check: bool,
+    checkpoint_quality: bool,
+    ecosystem_alignment: bool,
+    passed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LearningModuleGenerationState {
+    lesson_index: usize,
+    #[serde(default)]
+    lesson_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    validation: LearningModuleValidationState,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    updated_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -485,6 +517,8 @@ struct LearningSessionDocument {
     source: QuestSource,
     module: LearningModule,
     #[serde(default)]
+    module_statuses: Vec<LearningModuleGenerationState>,
+    #[serde(default)]
     ecosystem_id: Option<String>,
     #[serde(default)]
     topic: Option<String>,
@@ -510,6 +544,8 @@ struct SaveLearningSessionRequest {
     module_id: Option<String>,
     source: Option<QuestSource>,
     module: LearningModule,
+    #[serde(default)]
+    module_statuses: Vec<LearningModuleGenerationState>,
     #[serde(default)]
     ecosystem_id: Option<String>,
     #[serde(default)]
@@ -563,6 +599,7 @@ struct LearningSessionRecord {
     name: Option<String>,
     source: QuestSource,
     module: LearningModule,
+    module_statuses: Vec<LearningModuleGenerationState>,
     ecosystem_id: Option<String>,
     topic: Option<String>,
     learning_profile: Option<String>,
@@ -617,6 +654,96 @@ struct GenerateLearningQuestResponse {
     runner: LearningQuestRunnerState,
     persistence: PersistenceStatus,
     warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LearningEventRequest {
+    event_type: String,
+    #[serde(default)]
+    module_id: Option<String>,
+    #[serde(default)]
+    lesson_id: Option<String>,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    course_title: Option<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LearningEventDocument {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    provider: String,
+    event_type: String,
+    #[serde(default)]
+    module_id: Option<String>,
+    #[serde(default)]
+    lesson_id: Option<String>,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    course_title: Option<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+    created_at: BsonDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LearningEventRecord {
+    event_id: String,
+    event_type: String,
+    module_id: Option<String>,
+    lesson_id: Option<String>,
+    ecosystem_id: Option<String>,
+    course_title: Option<String>,
+    metadata: BTreeMap<String, String>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningEventResponse {
+    saved: bool,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct LearningMetricsSummary {
+    total_events: usize,
+    courses_generated: usize,
+    modules_opened: usize,
+    checkpoints_attempted: usize,
+    checkpoints_passed: usize,
+    courses_completed: usize,
+    tutor_used: usize,
+    generation_failures: usize,
+    by_event: BTreeMap<String, usize>,
+    by_ecosystem: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningMetricsResponse {
+    summary: LearningMetricsSummary,
+    recent_events: Vec<LearningEventRecord>,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningSessionExportResponse {
+    session: Option<LearningSessionRecord>,
+    markdown: String,
+    json: Value,
+    persistence: PersistenceStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningAdminReviewResponse {
+    sessions: Vec<LearningSessionRecord>,
+    metrics: LearningMetricsSummary,
+    recent_events: Vec<LearningEventRecord>,
+    persistence: PersistenceStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -1227,6 +1354,10 @@ impl MongoStore {
         Ok(self.database().await?.collection("learning_sessions"))
     }
 
+    async fn learning_events(&self) -> Result<Collection<LearningEventDocument>, ApiError> {
+        Ok(self.database().await?.collection("learning_events"))
+    }
+
     async fn record_generated_quest(
         &self,
         request: &GenerateQuestRequest,
@@ -1478,6 +1609,11 @@ impl MongoStore {
             user_address: user_id.to_string(),
             wallet: None,
             source: request.source.unwrap_or(QuestSource::OpenAi),
+            module_statuses: compact_module_generation_statuses(
+                request.module_statuses,
+                &module,
+                5,
+            ),
             module,
             ecosystem_id: request.ecosystem_id.map(|value| clamp_text(value, 48)),
             topic: request.topic.map(|value| clamp_text(value, 160)),
@@ -1501,6 +1637,84 @@ impl MongoStore {
             .await?;
 
         Ok(document.into())
+    }
+
+    async fn get_learning_session_by_id(
+        &self,
+        user_id: &str,
+        module_id: &str,
+    ) -> Result<Option<LearningSessionRecord>, ApiError> {
+        let user_id = user_id.trim();
+        let module_id = module_id.trim();
+        if user_id.is_empty() || module_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Ok(None);
+        }
+        let document = self
+            .learning_sessions()
+            .await?
+            .find_one(
+                doc! { "_id": module_id, "user_id": user_id, "status": { "$ne": "archived" } },
+            )
+            .await?;
+        Ok(document.map(LearningSessionRecord::from))
+    }
+
+    async fn save_learning_event(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        request: LearningEventRequest,
+    ) -> Result<(), ApiError> {
+        if !self.is_configured() {
+            return Err(ApiError::DatabaseUnavailable);
+        }
+        let event_type = normalized_learning_event_type(&request.event_type)?;
+        let user_id = principal.user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        let document = LearningEventDocument {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            provider: principal.provider.clone(),
+            event_type,
+            module_id: request.module_id.map(|value| clamp_text(value, 120)),
+            lesson_id: request.lesson_id.map(|value| clamp_text(value, 120)),
+            ecosystem_id: request.ecosystem_id.map(|value| clamp_text(value, 48)),
+            course_title: request.course_title.map(|value| clamp_text(value, 160)),
+            metadata: compact_event_metadata(request.metadata),
+            created_at: BsonDateTime::now(),
+        };
+        self.learning_events().await?.insert_one(document).await?;
+        Ok(())
+    }
+
+    async fn list_learning_events(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LearningEventRecord>, ApiError> {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Err(ApiError::InvalidPrompt);
+        }
+        if !self.is_configured() {
+            return Ok(Vec::new());
+        }
+        let mut cursor = self
+            .learning_events()
+            .await?
+            .find(doc! { "user_id": user_id })
+            .sort(doc! { "created_at": -1 })
+            .limit(limit.clamp(1, 500))
+            .await?;
+        let mut events = Vec::new();
+        while let Some(event) = cursor.try_next().await? {
+            events.push(LearningEventRecord::from(event));
+        }
+        Ok(events)
     }
 
     async fn archive_learning_session(
@@ -1903,6 +2117,138 @@ impl From<QuestRunDocument> for QuestRunRecord {
     }
 }
 
+impl From<LearningEventDocument> for LearningEventRecord {
+    fn from(event: LearningEventDocument) -> Self {
+        Self {
+            event_id: event.id,
+            event_type: event.event_type,
+            module_id: event.module_id,
+            lesson_id: event.lesson_id,
+            ecosystem_id: event.ecosystem_id,
+            course_title: event.course_title,
+            metadata: event.metadata,
+            created_at: bson_datetime_to_utc(event.created_at),
+        }
+    }
+}
+
+fn normalized_learning_event_type(value: &str) -> Result<String, ApiError> {
+    let normalized = value.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let allowed = [
+        "course_generated",
+        "module_opened",
+        "checkpoint_attempted",
+        "checkpoint_passed",
+        "course_completed",
+        "tutor_used",
+        "ecosystem_selected",
+        "generation_failed",
+        "module_regenerated",
+        "course_archived",
+        "course_deleted",
+    ];
+    if allowed.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(ApiError::InvalidPrompt)
+    }
+}
+
+fn compact_event_metadata(metadata: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = clamp_text(key.trim().to_ascii_lowercase().replace([' ', '-'], "_"), 48);
+            if key.is_empty() {
+                None
+            } else {
+                Some((key, clamp_text(value, 180)))
+            }
+        })
+        .take(16)
+        .collect()
+}
+
+fn summarize_learning_events(events: &[LearningEventRecord]) -> LearningMetricsSummary {
+    let mut summary = LearningMetricsSummary {
+        total_events: events.len(),
+        ..Default::default()
+    };
+    for event in events {
+        *summary
+            .by_event
+            .entry(event.event_type.clone())
+            .or_insert(0) += 1;
+        if let Some(ecosystem_id) = event
+            .ecosystem_id
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            *summary
+                .by_ecosystem
+                .entry(ecosystem_id.clone())
+                .or_insert(0) += 1;
+        }
+        match event.event_type.as_str() {
+            "course_generated" => summary.courses_generated += 1,
+            "module_opened" => summary.modules_opened += 1,
+            "checkpoint_attempted" => summary.checkpoints_attempted += 1,
+            "checkpoint_passed" => summary.checkpoints_passed += 1,
+            "course_completed" => summary.courses_completed += 1,
+            "tutor_used" => summary.tutor_used += 1,
+            "generation_failed" => summary.generation_failures += 1,
+            _ => {}
+        }
+    }
+    summary
+}
+
+fn learning_session_markdown(session: &LearningSessionRecord) -> String {
+    let mut markdown = String::new();
+    markdown.push_str(&format!("# {}\n\n", session.module.title));
+    markdown.push_str(&format!(
+        "- Ecosystem: {}\n",
+        session
+            .ecosystem_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
+    markdown.push_str(&format!(
+        "- Topic: {}\n",
+        session
+            .topic
+            .clone()
+            .unwrap_or_else(|| "untitled".to_string())
+    ));
+    markdown.push_str(&format!("- Status: {}\n", session.status));
+    markdown.push_str(&format!(
+        "- Active module: {}\n\n",
+        session.active_lesson_index + 1
+    ));
+    markdown.push_str(&format!("## Outcome\n\n{}\n\n", session.module.outcome));
+    markdown.push_str("## Module Statuses\n\n");
+    for status in &session.module_statuses {
+        markdown.push_str(&format!(
+            "- Module {}: {}{}\n",
+            status.lesson_index + 1,
+            status.status,
+            status
+                .error
+                .as_ref()
+                .map(|error| format!(" — {}", error))
+                .unwrap_or_default()
+        ));
+    }
+    markdown.push_str("\n## Lessons\n\n");
+    for (index, lesson) in session.module.lessons.iter().enumerate() {
+        markdown.push_str(&format!("### {}. {}\n\n", index + 1, lesson.title));
+        markdown.push_str(&format!("{}\n\n", lesson.why_it_matters));
+        markdown.push_str(&format!("{}\n\n", lesson.explanation));
+        markdown.push_str(&format!("Checkpoint: {}\n\n", lesson.checkpoint.question));
+    }
+    markdown
+}
+
 fn active_learning_session_status() -> String {
     "active".to_string()
 }
@@ -1915,6 +2261,135 @@ fn normalized_learning_session_status(status: &str) -> String {
     }
 }
 
+fn normalized_module_generation_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "queued" => "queued".to_string(),
+        "generating" => "generating".to_string(),
+        "ready" => "ready".to_string(),
+        "failed" => "failed".to_string(),
+        "validated" => "validated".to_string(),
+        _ => "queued".to_string(),
+    }
+}
+
+fn validation_state_from_lesson(lesson: &LearningLesson) -> LearningModuleValidationState {
+    let quality = &lesson.quality_score;
+    let source_grounding = !lesson.evidence_map.is_empty() && quality.source_coverage >= 75;
+    let technical_depth = quality.technical_depth >= 75;
+    let placeholder_free = quality.placeholder_free;
+    let checkpoint_quality = quality.checkpoint_quality >= 75;
+    let ecosystem_alignment = quality.ecosystem_alignment;
+    LearningModuleValidationState {
+        source_grounding,
+        technical_depth,
+        placeholder_free,
+        repetition_check: true,
+        checkpoint_quality,
+        ecosystem_alignment,
+        passed: source_grounding
+            && technical_depth
+            && placeholder_free
+            && checkpoint_quality
+            && ecosystem_alignment
+            && quality.passed,
+    }
+}
+
+fn module_generation_status_for_lesson(
+    lesson_index: usize,
+    lesson: &LearningLesson,
+    status: &str,
+    error: Option<String>,
+) -> LearningModuleGenerationState {
+    let validation = validation_state_from_lesson(lesson);
+    let resolved_status = match status {
+        "failed" => "failed".to_string(),
+        "generating" => "generating".to_string(),
+        _ if validation.passed => "validated".to_string(),
+        _ => "ready".to_string(),
+    };
+    LearningModuleGenerationState {
+        lesson_index,
+        lesson_id: Some(lesson.id.clone()),
+        status: resolved_status,
+        validation,
+        error,
+        updated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn learning_module_statuses_from_module(
+    module: &LearningModule,
+    total_lessons: usize,
+) -> Vec<LearningModuleGenerationState> {
+    let total = total_lessons.max(module.lessons.len()).max(1);
+    (0..total)
+        .map(|index| {
+            if let Some(lesson) = module.lessons.get(index) {
+                module_generation_status_for_lesson(index, lesson, "ready", None)
+            } else {
+                LearningModuleGenerationState {
+                    lesson_index: index,
+                    lesson_id: None,
+                    status: "queued".to_string(),
+                    validation: LearningModuleValidationState::default(),
+                    error: None,
+                    updated_at: Utc::now().to_rfc3339(),
+                }
+            }
+        })
+        .collect()
+}
+
+fn compact_module_generation_statuses(
+    statuses: Vec<LearningModuleGenerationState>,
+    module: &LearningModule,
+    total_lessons: usize,
+) -> Vec<LearningModuleGenerationState> {
+    let total = total_lessons.max(module.lessons.len()).max(1);
+    let mut merged = learning_module_statuses_from_module(module, total);
+
+    for status in statuses {
+        if status.lesson_index >= total {
+            continue;
+        }
+        let lesson = module.lessons.get(status.lesson_index);
+        let mut normalized = LearningModuleGenerationState {
+            lesson_index: status.lesson_index,
+            lesson_id: status
+                .lesson_id
+                .or_else(|| lesson.map(|item| item.id.clone())),
+            status: normalized_module_generation_status(&status.status),
+            validation: status.validation,
+            error: status.error.map(|value| clamp_text(value, 240)),
+            updated_at: if status.updated_at.trim().is_empty() {
+                Utc::now().to_rfc3339()
+            } else {
+                clamp_text(status.updated_at, 64)
+            },
+        };
+
+        if let Some(lesson) = lesson {
+            let validation = validation_state_from_lesson(lesson);
+            if normalized.validation == LearningModuleValidationState::default()
+                || validation.passed
+            {
+                normalized.validation = validation;
+            }
+            if normalized.status != "failed" && normalized.status != "generating" {
+                normalized.status = if normalized.validation.passed {
+                    "validated".to_string()
+                } else {
+                    "ready".to_string()
+                };
+            }
+        }
+        merged[status.lesson_index] = normalized;
+    }
+
+    merged
+}
+
 impl From<LearningSessionDocument> for LearningSessionRecord {
     fn from(session: LearningSessionDocument) -> Self {
         let user_id = if session.user_id.trim().is_empty() {
@@ -1922,6 +2397,8 @@ impl From<LearningSessionDocument> for LearningSessionRecord {
         } else {
             session.user_id
         };
+        let module_statuses =
+            compact_module_generation_statuses(session.module_statuses, &session.module, 5);
         Self {
             module_id: session.id,
             user_id,
@@ -1931,6 +2408,7 @@ impl From<LearningSessionDocument> for LearningSessionRecord {
             name: session.name,
             source: session.source,
             module: session.module,
+            module_statuses,
             ecosystem_id: session.ecosystem_id,
             topic: session.topic,
             learning_profile: session.learning_profile,
@@ -2177,6 +2655,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api_get_learning_session).post(api_save_learning_session),
         )
         .route("/ai/learning/sessions", get(api_list_learning_sessions))
+        .route(
+            "/ai/learning/events",
+            get(api_learning_metrics).post(api_save_learning_event),
+        )
+        .route("/ai/learning/admin/review", get(api_learning_admin_review))
+        .route(
+            "/ai/learning/sessions/{module_id}/export",
+            get(api_export_learning_session),
+        )
         .route(
             "/ai/learning/sessions/{module_id}",
             delete(api_delete_learning_session),
@@ -3274,6 +3761,7 @@ async fn generate_learning_module(
         module_id: Some(module_id.clone()),
         source: Some(source),
         module: module.clone(),
+        module_statuses: learning_module_statuses_from_module(&module, 5),
         ecosystem_id: Some(learning_ecosystem_id(&request)),
         topic: learning_topic_label(&request),
         learning_profile: request.learning_profile.clone(),
@@ -3346,6 +3834,9 @@ async fn generate_learning_lesson_endpoint(
         )
         .await?;
 
+    let module_status =
+        module_generation_status_for_lesson(request.lesson_index, &lesson, "ready", None);
+
     Ok(Json(GenerateLearningLessonResponse {
         source: QuestSource::OpenAi,
         module_title: learning_module_title(&module_request),
@@ -3355,6 +3846,7 @@ async fn generate_learning_lesson_endpoint(
         resources: default_learning_resources_for_focus(&learning_focus_label(&module_request)),
         lesson,
         lesson_index: request.lesson_index,
+        module_status,
         warning: None,
     }))
 }
@@ -3504,6 +3996,196 @@ async fn api_list_learning_sessions(
         })),
         Ok(Err(error)) => Err(error),
     }
+}
+
+async fn api_save_learning_event(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LearningEventRequest>,
+) -> Result<Json<LearningEventResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.save_learning_event(&principal, request),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(Json(LearningEventResponse {
+            saved: true,
+            persistence: PersistenceStatus {
+                saved: true,
+                warning: None,
+            },
+        })),
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning event persistence is degraded");
+            Ok(Json(LearningEventResponse {
+                saved: false,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningEventResponse {
+            saved: false,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_learning_metrics(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearningMetricsResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.list_learning_events(&principal.user_id, 500),
+    )
+    .await
+    {
+        Ok(Ok(events)) => {
+            let summary = summarize_learning_events(&events);
+            let recent_events = events.into_iter().take(25).collect();
+            Ok(Json(LearningMetricsResponse {
+                summary,
+                recent_events,
+                persistence: PersistenceStatus {
+                    saved: state.store.is_configured(),
+                    warning: None,
+                },
+            }))
+        }
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning metrics are degraded");
+            Ok(Json(LearningMetricsResponse {
+                summary: LearningMetricsSummary::default(),
+                recent_events: Vec::new(),
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningMetricsResponse {
+            summary: LearningMetricsSummary::default(),
+            recent_events: Vec::new(),
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_export_learning_session(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<LearningSessionExportResponse>, ApiError> {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state
+            .store
+            .get_learning_session_by_id(&principal.user_id, &module_id),
+    )
+    .await
+    {
+        Ok(Ok(session)) => {
+            let markdown = session
+                .as_ref()
+                .map(learning_session_markdown)
+                .unwrap_or_default();
+            let json = session
+                .as_ref()
+                .and_then(|session| serde_json::to_value(session).ok())
+                .unwrap_or(Value::Null);
+            Ok(Json(LearningSessionExportResponse {
+                session,
+                markdown,
+                json,
+                persistence: PersistenceStatus {
+                    saved: state.store.is_configured(),
+                    warning: None,
+                },
+            }))
+        }
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning session export is degraded");
+            Ok(Json(LearningSessionExportResponse {
+                session: None,
+                markdown: String::new(),
+                json: Value::Null,
+                persistence: PersistenceStatus {
+                    saved: false,
+                    warning: Some(learning_persistence_degraded_warning()),
+                },
+            }))
+        }
+        Err(_) => Ok(Json(LearningSessionExportResponse {
+            session: None,
+            markdown: String::new(),
+            json: Value::Null,
+            persistence: PersistenceStatus {
+                saved: false,
+                warning: Some(learning_persistence_degraded_warning()),
+            },
+        })),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn api_learning_admin_review(
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearningAdminReviewResponse>, ApiError> {
+    let sessions = match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.list_learning_sessions(&principal.user_id),
+    )
+    .await
+    {
+        Ok(Ok(sessions)) => sessions,
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning admin sessions are degraded");
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+        Ok(Err(error)) => return Err(error),
+    };
+
+    let events = match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.store.list_learning_events(&principal.user_id, 500),
+    )
+    .await
+    {
+        Ok(Ok(events)) => events,
+        Ok(Err(error @ (ApiError::Database(_) | ApiError::DatabaseUnavailable))) => {
+            warn!(%error, "learning admin events are degraded");
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+        Ok(Err(error)) => return Err(error),
+    };
+
+    Ok(Json(LearningAdminReviewResponse {
+        metrics: summarize_learning_events(&events),
+        recent_events: events.into_iter().take(25).collect(),
+        sessions,
+        persistence: PersistenceStatus {
+            saved: state.store.is_configured(),
+            warning: if state.store.is_configured() {
+                None
+            } else {
+                Some(learning_persistence_degraded_warning())
+            },
+        },
+    }))
 }
 
 async fn api_archive_learning_session(
@@ -7699,6 +8381,135 @@ mod tests {
         let document = checkpoint_answers_document(values.clone());
 
         assert_eq!(document_to_checkpoint_answers(document), values);
+    }
+
+    fn reviewed_learning_lesson(id: &str, title: &str) -> LearningLesson {
+        LearningLesson {
+            id: id.to_string(),
+            title: title.to_string(),
+            why_it_matters: "This reviewed lesson names the source-grounded trust boundary clearly.".to_string(),
+            explanation: "Concept: official source pack evidence. How it works: the learner separates protocol evidence from app state. Common mistake: trusting a frontend flag. Denial test: mutate the authoritative field and reject unsafe reuse. Further study: official documentation.".to_string(),
+            concepts: vec!["source pack".to_string(), "trust boundary".to_string()],
+            submodules: Vec::new(),
+            resources: default_learning_resources_for_focus("Zcash"),
+            evidence_map: vec![LearningEvidence {
+                claim: "The lesson is grounded in official source-pack guidance.".to_string(),
+                source_title: "Zcash Documentation".to_string(),
+                source_url: "https://zcash.readthedocs.io/".to_string(),
+                lesson_section: "lesson body".to_string(),
+                confidence: "source-pack".to_string(),
+            }],
+            quality_score: LearningQualityScore {
+                source_coverage: 100,
+                technical_depth: 92,
+                checkpoint_quality: 95,
+                placeholder_free: true,
+                ecosystem_alignment: true,
+                passed: true,
+            },
+            checkpoint: LearningCheckpoint {
+                question: "Which Zcash shielded checkout fields form the trusted boundary?".to_string(),
+                options: vec![
+                    LearningOption { label: "ZIP-321 request, shielded address, memo policy, viewing-key limit, and confirmation evidence".to_string(), feedback: "Correct.".to_string() },
+                    LearningOption { label: "The frontend paid flag".to_string(), feedback: "Unsafe.".to_string() },
+                    LearningOption { label: "Any explorer screenshot".to_string(), feedback: "Incomplete.".to_string() },
+                    LearningOption { label: "The user display name".to_string(), feedback: "Irrelevant.".to_string() },
+                ],
+                correct_index: 0,
+                explanation: "The trusted boundary is source-grounded payment evidence, not frontend state.".to_string(),
+                follow_up_question: "Which denial case would catch a wrong memo?".to_string(),
+            },
+            quest_bridge: "Build a denial test that mutates memo and address evidence.".to_string(),
+        }
+    }
+
+    #[test]
+    fn module_generation_statuses_preserve_failed_and_validated_modules() {
+        let lesson =
+            reviewed_learning_lesson("module-1-lesson-1", "Shielded checkout source boundary");
+        let module = LearningModule {
+            title: "Zcash shielded checkout".to_string(),
+            learner_profile: "Reviewer".to_string(),
+            outcome: "Validate source-grounded learning status.".to_string(),
+            lessons: vec![lesson],
+            capstone_quest_prompt: "Final reviewed quest".to_string(),
+            resources: default_learning_resources_for_focus("Zcash"),
+        };
+
+        let statuses = compact_module_generation_statuses(
+            vec![LearningModuleGenerationState {
+                lesson_index: 2,
+                lesson_id: None,
+                status: "failed".to_string(),
+                validation: LearningModuleValidationState::default(),
+                error: Some("provider timeout".to_string()),
+                updated_at: String::new(),
+            }],
+            &module,
+            5,
+        );
+
+        assert_eq!(statuses.len(), 5);
+        assert_eq!(statuses[0].status, "validated");
+        assert!(statuses[0].validation.passed);
+        assert_eq!(statuses[1].status, "queued");
+        assert_eq!(statuses[2].status, "failed");
+        assert_eq!(statuses[2].error.as_deref(), Some("provider timeout"));
+    }
+
+    #[test]
+    fn learning_metrics_summary_counts_core_events() {
+        let now = Utc::now();
+        let events = vec![
+            LearningEventRecord {
+                event_id: "1".to_string(),
+                event_type: "course_generated".to_string(),
+                module_id: Some("course-a".to_string()),
+                lesson_id: None,
+                ecosystem_id: Some("zcash".to_string()),
+                course_title: None,
+                metadata: BTreeMap::new(),
+                created_at: now,
+            },
+            LearningEventRecord {
+                event_id: "2".to_string(),
+                event_type: "checkpoint_attempted".to_string(),
+                module_id: Some("course-a".to_string()),
+                lesson_id: Some("lesson-a".to_string()),
+                ecosystem_id: Some("zcash".to_string()),
+                course_title: None,
+                metadata: BTreeMap::new(),
+                created_at: now,
+            },
+            LearningEventRecord {
+                event_id: "3".to_string(),
+                event_type: "checkpoint_passed".to_string(),
+                module_id: Some("course-a".to_string()),
+                lesson_id: Some("lesson-a".to_string()),
+                ecosystem_id: Some("zcash".to_string()),
+                course_title: None,
+                metadata: BTreeMap::new(),
+                created_at: now,
+            },
+            LearningEventRecord {
+                event_id: "4".to_string(),
+                event_type: "tutor_used".to_string(),
+                module_id: Some("course-a".to_string()),
+                lesson_id: Some("lesson-a".to_string()),
+                ecosystem_id: Some("zcash".to_string()),
+                course_title: None,
+                metadata: BTreeMap::new(),
+                created_at: now,
+            },
+        ];
+
+        let summary = summarize_learning_events(&events);
+        assert_eq!(summary.total_events, 4);
+        assert_eq!(summary.courses_generated, 1);
+        assert_eq!(summary.checkpoints_attempted, 1);
+        assert_eq!(summary.checkpoints_passed, 1);
+        assert_eq!(summary.tutor_used, 1);
+        assert_eq!(summary.by_ecosystem.get("zcash"), Some(&4));
     }
 
     #[test]
