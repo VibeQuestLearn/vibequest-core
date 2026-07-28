@@ -33,7 +33,7 @@ use platform::{
     AccountDeletion, AccountExport, CatalogResponse, EcosystemRegistry, PlatformStore,
     RegistryError, TrackRegistration,
 };
-use reqwest::{Client, StatusCode as ReqwestStatusCode};
+use reqwest::{Client, StatusCode as ReqwestStatusCode, Url};
 use ring::signature::{self, RsaPublicKeyComponents};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -100,6 +100,17 @@ struct OpenAiClient {
     reasoning_effort: ReasoningEffort,
     disable_response_storage: bool,
     timeout: Duration,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct AiProviderMetadata {
+    provider_kind: String,
+    model: String,
+    endpoint_origin: String,
+    reasoning_effort: ReasoningEffort,
+    response_storage_disabled: bool,
+    timeout_seconds: u64,
+    configured: bool,
 }
 
 #[derive(Clone)]
@@ -274,7 +285,9 @@ impl GenerateLearningLessonRequest {
 struct GenerateLearningModuleResponse {
     module_id: String,
     source: QuestSource,
+    provider: AiProviderMetadata,
     module: LearningModule,
+    eval_artifact: LearningEvalArtifact,
     warning: Option<String>,
     persistence: PersistenceStatus,
 }
@@ -282,6 +295,7 @@ struct GenerateLearningModuleResponse {
 #[derive(Debug, Serialize)]
 struct GenerateLearningLessonResponse {
     source: QuestSource,
+    provider: AiProviderMetadata,
     module_title: String,
     learner_profile: String,
     outcome: String,
@@ -290,6 +304,7 @@ struct GenerateLearningLessonResponse {
     lesson: LearningLesson,
     lesson_index: usize,
     module_status: LearningModuleGenerationState,
+    eval_artifact: LearningEvalArtifact,
     warning: Option<String>,
 }
 
@@ -396,6 +411,34 @@ struct LearningModuleGenerationState {
     error: Option<String>,
     #[serde(default)]
     updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LearningEvalArtifact {
+    artifact_version: String,
+    ecosystem_id: String,
+    topic: Option<String>,
+    learning_profile: Option<String>,
+    learning_intents: Vec<String>,
+    request_hash: String,
+    provider: AiProviderMetadata,
+    module_title: String,
+    lesson_count: usize,
+    validation: LearningModuleValidationState,
+    lesson_reports: Vec<LearningLessonEvalReport>,
+    warnings: Vec<String>,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LearningLessonEvalReport {
+    lesson_id: String,
+    title: String,
+    validation: LearningModuleValidationState,
+    quality_score: LearningQualityScore,
+    source_titles: Vec<String>,
+    source_urls: Vec<String>,
+    warning_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2390,6 +2433,262 @@ fn compact_module_generation_statuses(
     merged
 }
 
+fn learning_eval_artifact(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+    provider: AiProviderMetadata,
+) -> LearningEvalArtifact {
+    let lesson_reports = module
+        .lessons
+        .iter()
+        .map(learning_lesson_eval_report)
+        .collect::<Vec<_>>();
+    let validation = validation_state_from_module(module);
+    let warnings = learning_eval_warnings(module, &validation, &lesson_reports);
+
+    LearningEvalArtifact {
+        artifact_version: "vibequest-learning-eval-v1".to_string(),
+        ecosystem_id: learning_ecosystem_id(request),
+        topic: learning_topic_label(request),
+        learning_profile: request.learning_profile.clone(),
+        learning_intents: request.learning_intents.clone(),
+        request_hash: learning_request_hash(request),
+        provider,
+        module_title: module.title.clone(),
+        lesson_count: module.lessons.len(),
+        validation,
+        lesson_reports,
+        warnings,
+        generated_at: Utc::now(),
+    }
+}
+
+fn learning_lesson_eval_report(lesson: &LearningLesson) -> LearningLessonEvalReport {
+    let validation = validation_state_from_lesson(lesson);
+    LearningLessonEvalReport {
+        lesson_id: lesson.id.clone(),
+        title: lesson.title.clone(),
+        validation,
+        quality_score: lesson.quality_score.clone(),
+        source_titles: unique_learning_source_titles(lesson),
+        source_urls: unique_learning_source_urls(lesson),
+        warning_count: learning_lesson_eval_warnings(lesson).len(),
+    }
+}
+
+fn validation_state_from_module(module: &LearningModule) -> LearningModuleValidationState {
+    if module.lessons.is_empty() {
+        return LearningModuleValidationState::default();
+    }
+
+    let lesson_states = module
+        .lessons
+        .iter()
+        .map(validation_state_from_lesson)
+        .collect::<Vec<_>>();
+    let repetition_check = !module_has_learning_repetition(module);
+
+    LearningModuleValidationState {
+        source_grounding: lesson_states.iter().all(|state| state.source_grounding),
+        technical_depth: lesson_states.iter().all(|state| state.technical_depth),
+        placeholder_free: lesson_states.iter().all(|state| state.placeholder_free),
+        repetition_check,
+        checkpoint_quality: lesson_states.iter().all(|state| state.checkpoint_quality),
+        ecosystem_alignment: lesson_states.iter().all(|state| state.ecosystem_alignment),
+        passed: repetition_check && lesson_states.iter().all(|state| state.passed),
+    }
+}
+
+fn module_has_learning_repetition(module: &LearningModule) -> bool {
+    let mut titles = BTreeSet::new();
+    let mut checkpoints = BTreeSet::new();
+
+    for lesson in &module.lessons {
+        let title = normalized_fingerprint(&lesson.title);
+        if !title.is_empty() && !titles.insert(title) {
+            return true;
+        }
+
+        let checkpoint = normalized_fingerprint(&lesson.checkpoint.question);
+        if !checkpoint.is_empty() && !checkpoints.insert(checkpoint) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn learning_eval_warnings(
+    module: &LearningModule,
+    validation: &LearningModuleValidationState,
+    lesson_reports: &[LearningLessonEvalReport],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if !validation.source_grounding {
+        warnings.push("one or more lessons are missing source grounding".to_string());
+    }
+    if !validation.technical_depth {
+        warnings.push("one or more lessons do not meet depth requirements".to_string());
+    }
+    if !validation.placeholder_free {
+        warnings.push("placeholder or generic AI text was detected".to_string());
+    }
+    if !validation.repetition_check {
+        warnings.push("repeated lesson titles or checkpoints were detected".to_string());
+    }
+    if !validation.checkpoint_quality {
+        warnings.push("one or more checkpoints are too generic".to_string());
+    }
+    if !validation.ecosystem_alignment {
+        warnings
+            .push("one or more lessons appear misaligned with the selected ecosystem".to_string());
+    }
+
+    for (index, report) in lesson_reports.iter().enumerate() {
+        if report.warning_count > 0 {
+            warnings.push(format!(
+                "lesson {} '{}' has {} validation warning{}",
+                index + 1,
+                clamp_text(report.title.clone(), 80),
+                report.warning_count,
+                if report.warning_count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    if module.lessons.len() < 5 {
+        warnings.push("module has fewer than five generated lessons".to_string());
+    }
+
+    warnings
+}
+
+fn learning_lesson_eval_warnings(lesson: &LearningLesson) -> Vec<String> {
+    let validation = validation_state_from_lesson(lesson);
+    let mut warnings = Vec::new();
+
+    if !validation.source_grounding {
+        warnings.push("missing source grounding".to_string());
+    }
+    if !validation.technical_depth {
+        warnings.push("insufficient technical depth".to_string());
+    }
+    if !validation.placeholder_free {
+        warnings.push("placeholder text detected".to_string());
+    }
+    if !validation.checkpoint_quality {
+        warnings.push("generic checkpoint".to_string());
+    }
+    if !validation.ecosystem_alignment {
+        warnings.push("ecosystem alignment failed".to_string());
+    }
+
+    warnings
+}
+
+fn unique_learning_source_titles(lesson: &LearningLesson) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    lesson
+        .evidence_map
+        .iter()
+        .map(|source| source.source_title.as_str())
+        .chain(lesson.resources.iter().map(|source| source.title.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            if seen.insert(normalized) {
+                Some(clamp_text(value.to_string(), 120))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn unique_learning_source_urls(lesson: &LearningLesson) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    lesson
+        .evidence_map
+        .iter()
+        .map(|source| source.source_url.as_str())
+        .chain(lesson.resources.iter().map(|source| source.url.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            if seen.insert(normalized) {
+                Some(clamp_text(value.to_string(), 180))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn learning_request_hash(request: &GenerateLearningModuleRequest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(learning_ecosystem_id(request).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        request
+            .topic
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .as_bytes(),
+    );
+    hasher.update(b"\0");
+    hasher.update(
+        request
+            .learning_profile
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .as_bytes(),
+    );
+    hasher.update(b"\0");
+    for intent in &request.learning_intents {
+        hasher.update(intent.trim().as_bytes());
+        hasher.update(b"|");
+    }
+    hasher.update(b"\0");
+    hasher.update(request.background.trim().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(request.pace.trim().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(request.learner_goal.trim().as_bytes());
+    let digest = hasher.finalize();
+    format!("{digest:x}")
+}
+
+fn learning_provider_kind(base_url: &str) -> String {
+    let lower = base_url.to_ascii_lowercase();
+    if lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("0.0.0.0") {
+        "local-openai-compatible".to_string()
+    } else if lower.contains("api.openai.com") {
+        "openai".to_string()
+    } else {
+        "openai-compatible".to_string()
+    }
+}
+
+fn sanitized_endpoint_origin(base_url: &str) -> String {
+    let Ok(url) = Url::parse(base_url) else {
+        return "configured-openai-compatible-endpoint".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "configured-openai-compatible-endpoint".to_string();
+    };
+
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    origin
+}
+
 impl From<LearningSessionDocument> for LearningSessionRecord {
     fn from(session: LearningSessionDocument) -> Self {
         let user_id = if session.user_id.trim().is_empty() {
@@ -2775,6 +3074,18 @@ impl OpenAiClient {
                 .unwrap_or(DEFAULT_OPENAI_REASONING_EFFORT),
             disable_response_storage: parse_bool_env("OPENAI_DISABLE_RESPONSE_STORAGE", true),
             timeout: Duration::from_secs(timeout_seconds),
+        }
+    }
+
+    fn provider_metadata(&self) -> AiProviderMetadata {
+        AiProviderMetadata {
+            provider_kind: learning_provider_kind(&self.base_url),
+            model: clamp_text(self.model.clone(), 96),
+            endpoint_origin: sanitized_endpoint_origin(&self.base_url),
+            reasoning_effort: self.reasoning_effort,
+            response_storage_disabled: self.disable_response_storage,
+            timeout_seconds: self.timeout.as_secs(),
+            configured: self.api_key.is_some(),
         }
     }
 
@@ -3751,6 +4062,8 @@ async fn generate_learning_module(
 
     let module = state.openai.generate_learning_module(&request).await?;
     let source = QuestSource::OpenAi;
+    let provider = state.openai.provider_metadata();
+    let eval_artifact = learning_eval_artifact(&request, &module, provider.clone());
     let mut module_id = Uuid::new_v4().to_string();
     let mut persistence = PersistenceStatus {
         saved: false,
@@ -3799,7 +4112,9 @@ async fn generate_learning_module(
     Ok(Json(GenerateLearningModuleResponse {
         module_id,
         source,
+        provider,
         module,
+        eval_artifact,
         warning: persistence.warning.clone(),
         persistence,
     }))
@@ -3836,17 +4151,34 @@ async fn generate_learning_lesson_endpoint(
 
     let module_status =
         module_generation_status_for_lesson(request.lesson_index, &lesson, "ready", None);
+    let provider = state.openai.provider_metadata();
+    let module_title = learning_module_title(&module_request);
+    let learner_profile = learning_module_profile(&module_request);
+    let outcome = learning_module_outcome(&module_request);
+    let capstone_quest_prompt = learning_module_capstone_prompt(&module_request);
+    let resources = default_learning_resources_for_focus(&learning_focus_label(&module_request));
+    let eval_module = LearningModule {
+        title: module_title.clone(),
+        learner_profile: learner_profile.clone(),
+        outcome: outcome.clone(),
+        lessons: vec![lesson.clone()],
+        capstone_quest_prompt: capstone_quest_prompt.clone(),
+        resources: resources.clone(),
+    };
+    let eval_artifact = learning_eval_artifact(&module_request, &eval_module, provider.clone());
 
     Ok(Json(GenerateLearningLessonResponse {
         source: QuestSource::OpenAi,
-        module_title: learning_module_title(&module_request),
-        learner_profile: learning_module_profile(&module_request),
-        outcome: learning_module_outcome(&module_request),
-        capstone_quest_prompt: learning_module_capstone_prompt(&module_request),
-        resources: default_learning_resources_for_focus(&learning_focus_label(&module_request)),
+        provider,
+        module_title,
+        learner_profile,
+        outcome,
+        capstone_quest_prompt,
+        resources,
         lesson,
         lesson_index: request.lesson_index,
         module_status,
+        eval_artifact,
         warning: None,
     }))
 }
@@ -8370,6 +8702,126 @@ mod tests {
         assert_eq!(
             ReasoningEffort::Medium.serverless_safe(),
             ReasoningEffort::Minimal
+        );
+    }
+
+    #[test]
+    fn provider_metadata_redacts_secret_endpoint_details() {
+        let client = OpenAiClient {
+            http: Client::new(),
+            api_key: Some("sk-test-secret".to_string()),
+            model: "open-model".to_string(),
+            base_url: "https://share-ai.ckbdev.com/openai/v1?api_key=leaked".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            disable_response_storage: true,
+            timeout: Duration::from_secs(42),
+        };
+
+        let metadata = client.provider_metadata();
+        let serialized = serde_json::to_string(&metadata).expect("metadata serializes");
+
+        assert_eq!(metadata.provider_kind, "openai-compatible");
+        assert_eq!(metadata.endpoint_origin, "https://share-ai.ckbdev.com");
+        assert_eq!(metadata.timeout_seconds, 42);
+        assert!(metadata.response_storage_disabled);
+        assert!(metadata.configured);
+        assert!(!serialized.contains("sk-test-secret"));
+        assert!(!serialized.contains("leaked"));
+        assert!(!serialized.contains("api_key"));
+    }
+
+    #[test]
+    fn learning_eval_artifact_hashes_request_and_excludes_identity() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("zcash".to_string()),
+            ecosystem_id: Some("zcash".to_string()),
+            topic: Some("Shielded checkout".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Understand payment evidence".to_string()],
+            interests: vec!["Zcash".to_string()],
+            learner_goal: "Teach learner@example.com how to validate shielded checkout evidence"
+                .to_string(),
+            background: "Backend".to_string(),
+            pace: "Focused".to_string(),
+        };
+        let lesson = reviewed_learning_lesson("lesson-1", "Shielded checkout source boundary");
+        let module = LearningModule {
+            title: "Shielded checkout".to_string(),
+            learner_profile: "Backend dev".to_string(),
+            outcome: "Validate payment evidence".to_string(),
+            lessons: vec![lesson],
+            capstone_quest_prompt: "Prove the payment boundary".to_string(),
+            resources: vec![LearningResource {
+                title: "Zcash Documentation".to_string(),
+                url: "https://zcash.readthedocs.io/".to_string(),
+                reason: "Official Zcash reference".to_string(),
+            }],
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+
+        let artifact = learning_eval_artifact(&request, &module, provider);
+        let serialized = serde_json::to_string(&artifact).expect("artifact serializes");
+
+        assert_eq!(artifact.artifact_version, "vibequest-learning-eval-v1");
+        assert_eq!(artifact.ecosystem_id, "zcash");
+        assert_eq!(artifact.lesson_count, 1);
+        assert_eq!(artifact.request_hash.len(), 64);
+        assert!(!serialized.contains("learner@example.com"));
+        assert!(!serialized.contains("Teach learner"));
+        assert!(!serialized.contains("api_key"));
+        assert!(serialized.contains("Zcash Documentation"));
+    }
+
+    #[test]
+    fn learning_eval_artifact_flags_repeated_lessons() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("zcash".to_string()),
+            ecosystem_id: Some("zcash".to_string()),
+            topic: Some("Shielded checkout".to_string()),
+            learning_profile: Some("Security auditor".to_string()),
+            learning_intents: vec!["Find repeated generated lessons".to_string()],
+            interests: vec!["Zcash".to_string()],
+            learner_goal: "Audit generated shielded checkout lessons".to_string(),
+            background: "Security".to_string(),
+            pace: "Deep dive".to_string(),
+        };
+        let first = reviewed_learning_lesson("lesson-1", "Repeated boundary lesson");
+        let second = reviewed_learning_lesson("lesson-2", "Repeated boundary lesson");
+        let module = LearningModule {
+            title: "Shielded checkout".to_string(),
+            learner_profile: "Security auditor".to_string(),
+            outcome: "Audit generated lessons".to_string(),
+            lessons: vec![first, second],
+            capstone_quest_prompt: "Prove uniqueness".to_string(),
+            resources: Vec::new(),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+
+        let artifact = learning_eval_artifact(&request, &module, provider);
+
+        assert!(!artifact.validation.repetition_check);
+        assert!(!artifact.validation.passed);
+        assert!(
+            artifact
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("repeated lesson titles"))
         );
     }
 
