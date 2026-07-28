@@ -102,7 +102,7 @@ struct OpenAiClient {
     timeout: Duration,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct AiProviderMetadata {
     provider_kind: String,
     model: String,
@@ -413,7 +413,7 @@ struct LearningModuleGenerationState {
     updated_at: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct LearningEvalArtifact {
     artifact_version: String,
     ecosystem_id: String,
@@ -430,7 +430,7 @@ struct LearningEvalArtifact {
     generated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct LearningLessonEvalReport {
     lesson_id: String,
     title: String,
@@ -562,6 +562,8 @@ struct LearningSessionDocument {
     #[serde(default)]
     module_statuses: Vec<LearningModuleGenerationState>,
     #[serde(default)]
+    eval_artifacts: Vec<LearningEvalArtifact>,
+    #[serde(default)]
     ecosystem_id: Option<String>,
     #[serde(default)]
     topic: Option<String>,
@@ -589,6 +591,8 @@ struct SaveLearningSessionRequest {
     module: LearningModule,
     #[serde(default)]
     module_statuses: Vec<LearningModuleGenerationState>,
+    #[serde(default)]
+    eval_artifacts: Vec<LearningEvalArtifact>,
     #[serde(default)]
     ecosystem_id: Option<String>,
     #[serde(default)]
@@ -643,6 +647,7 @@ struct LearningSessionRecord {
     source: QuestSource,
     module: LearningModule,
     module_statuses: Vec<LearningModuleGenerationState>,
+    eval_artifacts: Vec<LearningEvalArtifact>,
     ecosystem_id: Option<String>,
     topic: Option<String>,
     learning_profile: Option<String>,
@@ -824,7 +829,7 @@ enum Difficulty {
     Boss,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ReasoningEffort {
     None,
@@ -1657,6 +1662,7 @@ impl MongoStore {
                 &module,
                 5,
             ),
+            eval_artifacts: compact_learning_eval_artifacts(request.eval_artifacts, &module, 5),
             module,
             ecosystem_id: request.ecosystem_id.map(|value| clamp_text(value, 48)),
             topic: request.topic.map(|value| clamp_text(value, 160)),
@@ -2433,6 +2439,96 @@ fn compact_module_generation_statuses(
     merged
 }
 
+fn compact_learning_eval_artifacts(
+    artifacts: Vec<LearningEvalArtifact>,
+    module: &LearningModule,
+    total_lessons: usize,
+) -> Vec<LearningEvalArtifact> {
+    let lesson_ids = module
+        .lessons
+        .iter()
+        .map(|lesson| lesson.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let limit = total_lessons.max(module.lessons.len()).max(1);
+    let mut seen_lessons = std::collections::BTreeSet::new();
+    let mut compacted = Vec::new();
+
+    for artifact in artifacts.into_iter().rev() {
+        let report_lesson_id = artifact
+            .lesson_reports
+            .iter()
+            .find(|report| lesson_ids.contains(&report.lesson_id))
+            .map(|report| report.lesson_id.clone());
+        let Some(report_lesson_id) = report_lesson_id else {
+            continue;
+        };
+        if !seen_lessons.insert(report_lesson_id) {
+            continue;
+        }
+        compacted.push(compact_learning_eval_artifact(artifact, limit));
+        if compacted.len() >= limit {
+            break;
+        }
+    }
+
+    compacted.reverse();
+    compacted
+}
+
+fn compact_learning_eval_artifact(
+    artifact: LearningEvalArtifact,
+    lesson_report_limit: usize,
+) -> LearningEvalArtifact {
+    LearningEvalArtifact {
+        artifact_version: clamp_text(artifact.artifact_version, 64),
+        ecosystem_id: clamp_text(artifact.ecosystem_id, 48),
+        topic: artifact.topic.map(|topic| clamp_text(topic, 160)),
+        learning_profile: artifact
+            .learning_profile
+            .map(|profile| clamp_text(profile, 80)),
+        learning_intents: compact_string_list(artifact.learning_intents, 10, 140),
+        request_hash: clamp_text(artifact.request_hash, 96),
+        provider: compact_ai_provider_metadata(artifact.provider),
+        module_title: clamp_text(artifact.module_title, 160),
+        lesson_count: artifact.lesson_count.min(20),
+        validation: artifact.validation,
+        lesson_reports: artifact
+            .lesson_reports
+            .into_iter()
+            .map(compact_learning_lesson_eval_report)
+            .take(lesson_report_limit)
+            .collect(),
+        warnings: compact_string_list(artifact.warnings, 12, 220),
+        generated_at: artifact.generated_at,
+    }
+}
+
+fn compact_learning_lesson_eval_report(
+    report: LearningLessonEvalReport,
+) -> LearningLessonEvalReport {
+    LearningLessonEvalReport {
+        lesson_id: clamp_text(report.lesson_id, 120),
+        title: clamp_text(report.title, 160),
+        validation: report.validation,
+        quality_score: report.quality_score,
+        source_titles: compact_string_list(report.source_titles, 8, 100),
+        source_urls: compact_string_list(report.source_urls, 8, 220),
+        warning_count: report.warning_count.min(99),
+    }
+}
+
+fn compact_ai_provider_metadata(provider: AiProviderMetadata) -> AiProviderMetadata {
+    AiProviderMetadata {
+        provider_kind: clamp_text(provider.provider_kind, 64),
+        model: clamp_text(provider.model, 80),
+        endpoint_origin: clamp_text(provider.endpoint_origin, 160),
+        reasoning_effort: provider.reasoning_effort,
+        response_storage_disabled: provider.response_storage_disabled,
+        timeout_seconds: provider.timeout_seconds.min(600),
+        configured: provider.configured,
+    }
+}
+
 fn learning_eval_artifact(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
@@ -2698,6 +2794,8 @@ impl From<LearningSessionDocument> for LearningSessionRecord {
         };
         let module_statuses =
             compact_module_generation_statuses(session.module_statuses, &session.module, 5);
+        let eval_artifacts =
+            compact_learning_eval_artifacts(session.eval_artifacts, &session.module, 5);
         Self {
             module_id: session.id,
             user_id,
@@ -2708,6 +2806,7 @@ impl From<LearningSessionDocument> for LearningSessionRecord {
             source: session.source,
             module: session.module,
             module_statuses,
+            eval_artifacts,
             ecosystem_id: session.ecosystem_id,
             topic: session.topic,
             learning_profile: session.learning_profile,
@@ -4075,6 +4174,7 @@ async fn generate_learning_module(
         source: Some(source),
         module: module.clone(),
         module_statuses: learning_module_statuses_from_module(&module, 5),
+        eval_artifacts: vec![eval_artifact.clone()],
         ecosystem_id: Some(learning_ecosystem_id(&request)),
         topic: learning_topic_label(&request),
         learning_profile: request.learning_profile.clone(),
