@@ -16,6 +16,7 @@ pub const BASICS_ECOSYSTEM_ID: &str = "basics";
 pub const CKB_ECOSYSTEM_ID: &str = "ckb";
 pub const FIBER_ECOSYSTEM_ID: &str = "fiber";
 pub const STACKS_ECOSYSTEM_ID: &str = "stacks";
+pub const TON_STONFI_ECOSYSTEM_ID: &str = "ton-stonfi";
 pub const ZCASH_ECOSYSTEM_ID: &str = "zcash";
 pub const SHIELDED_PAYMENTS_TRACK_ID: &str = "shielded-payments-safety";
 
@@ -42,6 +43,7 @@ pub enum EcosystemConfiguration {
     Ckb(GenericEcosystemRegistration),
     Fiber(GenericEcosystemRegistration),
     Stacks(GenericEcosystemRegistration),
+    TonStonfi(GenericEcosystemRegistration),
     Zcash(ZcashRegistration),
 }
 
@@ -314,6 +316,29 @@ impl EcosystemRegistry {
                         "sBTC",
                         "BNS",
                         "wallet authorization",
+                    ],
+                )),
+            ),
+            generic_ecosystem(
+                TON_STONFI_ECOSYSTEM_ID,
+                "TON / STON.fi",
+                "STON.fi integration labs for TON builders implementing swaps, widget flows, jetton checks, slippage safety, and transaction-state handling.",
+                EcosystemConfiguration::TonStonfi(generic_registration(
+                    "ton-stonfi-source-pack-1.0.0",
+                    [
+                        "STON.fi DEX SDK documentation",
+                        "STON.fi Omniston widget documentation",
+                        "STON.fi REST API documentation",
+                        "TON Connect documentation",
+                        "TON Jetton documentation",
+                    ],
+                    [
+                        "STON.fi swap quotes",
+                        "Omniston widget integration",
+                        "TON Connect wallet boundaries",
+                        "jetton verification",
+                        "slippage and stale quote denial tests",
+                        "transaction-state evidence",
                     ],
                 )),
             ),
@@ -751,7 +776,7 @@ mod tests {
         let catalog = registry.catalog();
 
         assert_eq!(catalog.schema_version, SCHEMA_VERSION);
-        assert_eq!(catalog.ecosystems.len(), 5);
+        assert_eq!(catalog.ecosystems.len(), 6);
         assert!(
             catalog
                 .ecosystems
@@ -775,6 +800,12 @@ mod tests {
                 .ecosystems
                 .iter()
                 .any(|ecosystem| ecosystem.ecosystem_id == STACKS_ECOSYSTEM_ID)
+        );
+        assert!(
+            catalog
+                .ecosystems
+                .iter()
+                .any(|ecosystem| ecosystem.ecosystem_id == TON_STONFI_ECOSYSTEM_ID)
         );
         let zcash = catalog
             .ecosystems

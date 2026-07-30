@@ -427,6 +427,8 @@ struct LearningEvalArtifact {
     validation: LearningModuleValidationState,
     lesson_reports: Vec<LearningLessonEvalReport>,
     warnings: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    integration_tags: Vec<String>,
     generated_at: DateTime<Utc>,
 }
 
@@ -441,13 +443,13 @@ struct LearningLessonEvalReport {
     warning_count: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AiLearningModuleCompact {
     t: String,
     l: Vec<AiLearningLessonCompact>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AiLearningLessonCompact {
     t: String,
     e: String,
@@ -2499,6 +2501,7 @@ fn compact_learning_eval_artifact(
             .take(lesson_report_limit)
             .collect(),
         warnings: compact_string_list(artifact.warnings, 12, 220),
+        integration_tags: compact_string_list(artifact.integration_tags, 12, 80),
         generated_at: artifact.generated_at,
     }
 }
@@ -2529,6 +2532,47 @@ fn compact_ai_provider_metadata(provider: AiProviderMetadata) -> AiProviderMetad
     }
 }
 
+fn learning_integration_tags(request: &GenerateLearningModuleRequest) -> Vec<String> {
+    match learning_ecosystem_id(request).as_str() {
+        "ton-stonfi" => vec![
+            "sdk".to_string(),
+            "widget".to_string(),
+            "ton-connect".to_string(),
+            "jetton".to_string(),
+            "slippage".to_string(),
+            "quote-freshness".to_string(),
+            "transaction-state".to_string(),
+        ],
+        "zcash" => vec![
+            "zip-321".to_string(),
+            "shielded-address".to_string(),
+            "viewing-key".to_string(),
+            "memo".to_string(),
+            "confirmation-safety".to_string(),
+        ],
+        "stacks" => vec![
+            "clarity".to_string(),
+            "wallet-authorization".to_string(),
+            "post-condition".to_string(),
+            "sbtc".to_string(),
+            "bns".to_string(),
+        ],
+        "fiber" => vec![
+            "invoice".to_string(),
+            "ptlc".to_string(),
+            "channel-state".to_string(),
+            "replay-defense".to_string(),
+        ],
+        "ckb" => vec![
+            "cell".to_string(),
+            "outpoint".to_string(),
+            "script".to_string(),
+            "witness".to_string(),
+        ],
+        _ => vec!["source-grounded-learning".to_string()],
+    }
+}
+
 fn learning_eval_artifact(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
@@ -2555,6 +2599,7 @@ fn learning_eval_artifact(
         validation,
         lesson_reports,
         warnings,
+        integration_tags: learning_integration_tags(request),
         generated_at: Utc::now(),
     }
 }
@@ -2657,7 +2702,72 @@ fn learning_eval_warnings(
         warnings.push("module has fewer than five generated lessons".to_string());
     }
 
+    warnings.extend(ton_stonfi_module_warnings(module));
+
     warnings
+}
+
+fn ton_stonfi_module_warnings(module: &LearningModule) -> Vec<String> {
+    let combined = format!(
+        "{} {} {}",
+        module.title,
+        module.outcome,
+        module
+            .lessons
+            .iter()
+            .map(|lesson| format!(
+                "{} {} {} {} {}",
+                lesson.title,
+                lesson.explanation,
+                lesson.checkpoint.question,
+                lesson.quest_bridge,
+                lesson.concepts.join(" ")
+            ))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_ascii_lowercase();
+
+    let looks_ton_stonfi = ["ston.fi", "stonfi", "omniston", "ton connect", "jetton"]
+        .iter()
+        .any(|term| combined.contains(term));
+    if !looks_ton_stonfi {
+        return Vec::new();
+    }
+
+    let checks = [
+        (
+            "TON Connect wallet boundary is not explicit",
+            combined.contains("ton connect")
+                && (combined.contains("manifest") || combined.contains("wallet approval")),
+        ),
+        (
+            "jetton verification does not name master or wallet contract evidence",
+            combined.contains("jetton")
+                && (combined.contains("master") || combined.contains("wallet contract")),
+        ),
+        (
+            "slippage/min-out safety is not explicit",
+            combined.contains("slippage")
+                && (combined.contains("min-out") || combined.contains("minout")),
+        ),
+        (
+            "quote freshness or stale quote denial is not explicit",
+            combined.contains("quote") && combined.contains("stale"),
+        ),
+        (
+            "transaction-state evidence is not explicit",
+            combined.contains("transaction")
+                && (combined.contains("pending")
+                    || combined.contains("confirmed")
+                    || combined.contains("final")),
+        ),
+    ];
+
+    checks
+        .into_iter()
+        .filter_map(|(warning, passed)| (!passed).then(|| warning.to_string()))
+        .collect()
 }
 
 fn learning_lesson_eval_warnings(lesson: &LearningLesson) -> Vec<String> {
@@ -5389,13 +5499,38 @@ fn ai_generated_quest_file(
 
     let lower = trimmed.to_lowercase();
     let has_domain_signal = [
-        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
-        "proof", "receipt", "payout", "runid",
+        "ckb",
+        "cell",
+        "witness",
+        "script",
+        "xudt",
+        "fiber",
+        "invoice",
+        "ptlc",
+        "htlc",
+        "channel",
+        "proof",
+        "receipt",
+        "payout",
+        "runid",
+        "ton",
+        "ston.fi",
+        "stonfi",
+        "omniston",
+        "jetton",
+        "slippage",
+        "minout",
+        "min-out",
+        "quote",
+        "route",
+        "swap",
+        "ton connect",
+        "transaction state",
     ]
     .iter()
     .any(|term| lower.contains(term));
     let has_denial_signal = [
-        "reject", "block", "false", "throw", "invalid", "unpaid", "mismatch", "replay",
+        "reject", "block", "false", "throw", "invalid", "unpaid", "mismatch", "replay", "stale",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -5563,8 +5698,31 @@ fn validate_quest_quality(quest: &QuestBlueprint) -> Result<(), ApiError> {
             || haystack.contains("throws")
     });
     let has_domain_signal = [
-        "ckb", "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
-        "proof", "receipt", "payout",
+        "ckb",
+        "cell",
+        "witness",
+        "script",
+        "xudt",
+        "fiber",
+        "invoice",
+        "ptlc",
+        "htlc",
+        "channel",
+        "proof",
+        "receipt",
+        "payout",
+        "ton",
+        "ston.fi",
+        "stonfi",
+        "omniston",
+        "jetton",
+        "slippage",
+        "minout",
+        "min-out",
+        "quote",
+        "route",
+        "swap",
+        "ton connect",
     ]
     .iter()
     .any(|term| workspace.contains(term));
@@ -5583,8 +5741,36 @@ fn validate_quest_quality(quest: &QuestBlueprint) -> Result<(), ApiError> {
     .iter()
     .any(|term| workspace.contains(term));
     let has_specific_challenge = [
-        "cell", "witness", "script", "xudt", "fiber", "invoice", "ptlc", "htlc", "channel",
-        "proof", "receipt", "payout", "reader", "run", "content", "outpoint", "nonce",
+        "cell",
+        "witness",
+        "script",
+        "xudt",
+        "fiber",
+        "invoice",
+        "ptlc",
+        "htlc",
+        "channel",
+        "proof",
+        "receipt",
+        "payout",
+        "reader",
+        "run",
+        "content",
+        "outpoint",
+        "nonce",
+        "ton",
+        "ston.fi",
+        "stonfi",
+        "omniston",
+        "jetton",
+        "slippage",
+        "minout",
+        "min-out",
+        "quote",
+        "route",
+        "swap",
+        "ton connect",
+        "transaction",
     ]
     .iter()
     .any(|term| workspace.contains(term) && challenge_text.contains(term));
@@ -6409,12 +6595,55 @@ fn default_learning_resources() -> Vec<LearningResource> {
             url: "https://docs.stacks.co/".to_string(),
             reason: "Reference Stacks, Clarity, transactions, wallets, sBTC, and Bitcoin-secured app development.".to_string(),
         },
+        LearningResource {
+            title: "STON.fi DEX SDK Documentation".to_string(),
+            url: "https://docs.ston.fi/developer-section/dex/sdk".to_string(),
+            reason: "Reference STON.fi swap quote, route, router, transaction, pool, and SDK integration behavior.".to_string(),
+        },
+        LearningResource {
+            title: "STON.fi Omniston Widget Documentation".to_string(),
+            url: "https://docs.ston.fi/developer-section/widget/widget".to_string(),
+            reason: "Reference Omniston widget loading, TON Connect manifest use, default assets, and integration UX.".to_string(),
+        },
+        LearningResource {
+            title: "STON.fi REST API Documentation".to_string(),
+            url: "https://docs.ston.fi/developer-section/dex/api".to_string(),
+            reason: "Reference pool, jetton, quote, and referral-fee data used by STON.fi integrations.".to_string(),
+        },
+        LearningResource {
+            title: "TON Connect Documentation".to_string(),
+            url: "https://docs.ton.org/applications/ton-connect/overview".to_string(),
+            reason: "Reference wallet connection, manifest boundaries, wallet approval, and app authorization on TON.".to_string(),
+        },
+        LearningResource {
+            title: "TON Jetton Documentation".to_string(),
+            url: "https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works".to_string(),
+            reason: "Reference jetton master contracts, wallet contracts, metadata risks, and token verification boundaries.".to_string(),
+        },
     ]
 }
 
 fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
     let lower = focus.to_ascii_lowercase();
     let all = default_learning_resources();
+    if lower.contains("ston")
+        || lower.contains("omniston")
+        || lower.contains("ton connect")
+        || lower.contains("jetton")
+        || lower.contains("ton / ston")
+        || lower.contains("ton-stonfi")
+    {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("ston.fi")
+                    || text.contains("docs.ston")
+                    || text.contains("ton connect")
+                    || text.contains("jetton")
+            })
+            .collect();
+    }
     if lower.contains("stacks")
         || lower.contains("clarity")
         || lower.contains("sbtc")
@@ -6795,6 +7024,16 @@ fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static
             "sbtc documentation",
             "bns documentation",
         ],
+        "ton-stonfi" => &[
+            "official ston.fi",
+            "ston.fi documentation",
+            "docs.ston.fi",
+            "ston.fi dex sdk",
+            "omniston widget",
+            "ton connect documentation",
+            "ton jetton documentation",
+            "docs.ton.org",
+        ],
         "zcash" => &[
             "official zcash",
             "zcash documentation",
@@ -6842,6 +7081,10 @@ fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static
             "official zcash",
             "stacks documentation",
             "official stacks",
+            "ston.fi documentation",
+            "docs.ston.fi",
+            "ton connect documentation",
+            "docs.ton.org",
             "ethereum developer docs",
             "mdn web docs",
             "source pack",
@@ -6972,6 +7215,23 @@ fn role_specific_terms(ecosystem_id: &str, lesson_index: usize) -> &'static [&'s
         ],
         ("stacks", 3) => &["sbtc", "bns", "bitcoin-backed", "name", "identity"],
         ("stacks", 4) => &["quest", "clarity", "denial test", "authorization", "proof"],
+        ("ton-stonfi", 0) => &["ton", "ston.fi", "wallet", "swap", "transaction"],
+        ("ton-stonfi", 1) => &["quote", "route", "sdk", "router", "swap"],
+        ("ton-stonfi", 2) => &[
+            "jetton",
+            "master",
+            "wallet contract",
+            "metadata",
+            "allowlist",
+        ],
+        ("ton-stonfi", 3) => &["slippage", "min-out", "referral", "fee", "stale"],
+        ("ton-stonfi", 4) => &[
+            "quest",
+            "ton connect",
+            "denial test",
+            "transaction state",
+            "ston.fi",
+        ],
         ("ckb", 0) => &["cell", "live cell", "capacity", "state"],
         ("ckb", 1) => &["outpoint", "input", "output", "transaction"],
         ("ckb", 2) => &["script", "witness", "lock", "type"],
@@ -7158,6 +7418,17 @@ fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> b
             "proof of transfer",
             "bitcoin",
         ],
+        "ton-stonfi" => &[
+            "ston.fi",
+            "stonfi",
+            "omniston",
+            "ton connect",
+            "jetton",
+            "slippage",
+            "min-out",
+            "quote",
+            "swap",
+        ],
         "zcash" => &[
             "zcash",
             "zip-321",
@@ -7217,6 +7488,18 @@ fn contains_unrequested_ecosystem_leakage(
             "zip-321",
             "zatoshi",
             "orchard receiver",
+        ],
+        "ton-stonfi" => &[
+            "joyid",
+            "xudt",
+            "ckb cell",
+            "outpoint lineage",
+            "zip-321",
+            "zatoshi",
+            "orchard receiver",
+            "clarity contract",
+            "sbtc",
+            "bns",
         ],
         "zcash" => &[
             "joyid",
@@ -7323,6 +7606,18 @@ fn generic_learning_checkpoint_question(question: &str) -> bool {
         "post-condition",
         "principal",
         "proof of transfer",
+        "ton",
+        "ston.fi",
+        "stonfi",
+        "omniston",
+        "ton connect",
+        "jetton",
+        "jetton master",
+        "wallet contract",
+        "slippage",
+        "min-out",
+        "quote",
+        "route",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -7671,6 +7966,17 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         ("post-condition", "post-condition"),
         ("principal", "principal"),
         ("proof of transfer", "Proof of Transfer"),
+        ("ston.fi", "STON.fi integration"),
+        ("stonfi", "STON.fi integration"),
+        ("omniston", "Omniston widget"),
+        ("ton connect", "TON Connect"),
+        ("jetton master", "jetton master contract"),
+        ("jetton", "jetton"),
+        ("slippage", "slippage boundary"),
+        ("min-out", "min-out constraint"),
+        ("quote", "quote freshness"),
+        ("route", "swap route"),
+        ("referral", "referral fee disclosure"),
     ] {
         if lower.contains(needle) && !concepts.iter().any(|value| value == concept) {
             concepts.push(concept.to_string());
@@ -7697,6 +8003,13 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 
     if raw.contains("basic") || raw.contains("web") || raw.contains("blockchain") {
         "basics".to_string()
+    } else if raw.contains("ton-stonfi")
+        || raw.contains("ston.fi")
+        || raw.contains("stonfi")
+        || raw.contains("omniston")
+        || raw.contains("jetton")
+    {
+        "ton-stonfi".to_string()
     } else if raw.contains("stacks")
         || raw.contains("clarity")
         || raw.contains("sbtc")
@@ -7717,6 +8030,7 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static str {
     match learning_ecosystem_id(request).as_str() {
         "stacks" => "Stacks",
+        "ton-stonfi" => "TON / STON.fi",
         "zcash" => "Zcash",
         "fiber" => "Fiber",
         "ckb" => "CKB",
@@ -7772,6 +8086,9 @@ fn clean_learning_module_title(raw: &str) -> String {
     let mut cleaned = title.to_string();
     for ecosystem in [
         "Stacks",
+        "TON / STON.fi",
+        "STON.fi",
+        "TON",
         "Zcash",
         "CKB",
         "Fiber",
@@ -7894,6 +8211,10 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             "Generate a Stacks learning quest for {} with Stacks/Bitcoin reasoning, Clarity-safe authorization, sBTC or BNS product context where relevant, checkpoint evidence, and one denial test for unsafe app assumptions.",
             learning_focus_label(request)
         ),
+        "ton-stonfi" => format!(
+            "Generate a TON / STON.fi integration quest for {} with SDK or Omniston widget code, TON Connect wallet boundary, jetton verification, slippage/min-out checks, stale quote denial tests, and transaction-state evidence.",
+            learning_focus_label(request)
+        ),
         "basics" => format!(
             "Generate a beginner Web3 foundations quest for {} with plain-language wallet, transaction, block explorer, network safety, and confirmation reasoning plus one practical denial test.",
             learning_focus_label(request)
@@ -7921,6 +8242,19 @@ fn learning_lesson_role(
             "viewing-key, memo, address, and disclosure boundaries in generated app code",
             "denial testing for malformed requests, transparent memo misuse, replay, wrong-network, and unsafe recipient cases",
             "turning Zcash shielded-checkout understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("ton-stonfi")
+        || discriminator.contains("ston.fi")
+        || discriminator.contains("stonfi")
+        || discriminator.contains("omniston")
+        || discriminator.contains("jetton")
+    {
+        [
+            "TON DeFi mental model for STON.fi integrations: wallet connection, swaps, and transaction evidence",
+            "STON.fi SDK or Omniston quote flow: route construction, quote freshness, and transaction building",
+            "jetton verification: master contract identity, wallet contract distinction, metadata spoofing, and allowlists",
+            "slippage, min-out, referral fee disclosure, stale quote denial, and wallet approval UX",
+            "turning STON.fi understanding into a safe swap integration quest with denial tests",
         ]
     } else if discriminator.contains("stacks")
         || discriminator.contains("clarity")
@@ -8007,6 +8341,13 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         .to_ascii_lowercase();
     if discriminator.contains("zcash") {
         "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
+    } else if discriminator.contains("ton-stonfi")
+        || discriminator.contains("ston.fi")
+        || discriminator.contains("stonfi")
+        || discriminator.contains("omniston")
+        || discriminator.contains("jetton")
+    {
+        "Ground the lesson in TON / STON.fi DeFi integration: STON.fi DEX SDK, Omniston widget flows, TON Connect wallet authorization, jetton master versus jetton wallet contracts, quote freshness, swap routes, slippage/min-out checks, referral-fee disclosure, and denial cases that prevent trusting UI state, token metadata, REST responses, or pending wallet state as final transaction evidence."
     } else if discriminator.contains("stacks")
         || discriminator.contains("clarity")
         || discriminator.contains("sbtc")
@@ -8033,6 +8374,9 @@ fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) 
     match learning_ecosystem_id(request).as_str() {
         "stacks" => {
             "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
+        }
+        "ton-stonfi" => {
+            "Ground facts in official STON.fi and TON sources without quoting them: STON.fi DEX SDK https://docs.ston.fi/developer-section/dex/sdk, Omniston widget https://docs.ston.fi/developer-section/widget/widget, STON.fi REST API https://docs.ston.fi/developer-section/dex/api, TON Connect https://docs.ton.org/applications/ton-connect/overview, and TON Jettons https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works. Do not use CKB, Fiber, Zcash, or Stacks examples unless the learner explicitly asked to compare ecosystems."
         }
         "zcash" => {
             "Ground facts in official Zcash sources without quoting them: Zcash docs https://zcash.readthedocs.io/ and ZIP-321 https://zips.z.cash/zip-0321 for shielded payments, payment requests, privacy boundaries, memos, viewing keys, and confirmation safety."
@@ -8108,7 +8452,7 @@ VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}.
 
 Global VibeQuest accuracy standard: teach as if a reviewer will compare every claim against the official source pack. Separate protocol evidence from app state. Name the exact verification boundary, one edge case, one denial test, and one nuance where a common shortcut would be wrong. Do not repeat a prior module's title, opening, checkpoint, code lens, or proof boundary.
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, or Proof of Transfer. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, Proof of Transfer, STON.fi swap quote, Omniston widget config, TON Connect manifest, jetton master address, jetton wallet contract, slippage, min-out, stale quote, referral fee, route, or transaction state. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -8192,12 +8536,12 @@ Learner question: {question}
 Keys exactly: answer,code_walkthrough,common_misunderstanding,follow_up_question,references.
 Rules:
 - Ground the answer in the generated files. Mention file paths, functions, fields, and tests when useful.
-- Teach the CKB/Fiber concept behind the code, then explain the vibecoding mistake this prevents.
+- Teach the selected ecosystem or protocol concept behind the code, then explain the AI-coding mistake this prevents.
 - If the learner asks for a patch, describe the change and the denial test to add.
 - code_walkthrough: 3-5 short bullets, each tied to a concrete line/function/field in the generated files.
 - common_misunderstanding: name the likely wrong mental model and correct it.
 - follow_up_question: ask one question that checks whether the learner truly understood this code.
-- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Ethereum developer docs or JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Stacks docs, STON.fi docs, TON docs, Ethereum developer docs, or JoyID docs when relevant.
 - Keep answer under 170 words."#,
         title = request.quest_title.trim(),
         objective = request.quest_objective.trim(),
@@ -8225,7 +8569,7 @@ Rules:
 - If the learner asks for a walkthrough, explain: concept gist, how the code lens works, what the checkpoint is testing, the likely vibecoding mistake, and one concrete denial-test habit.
 - If the learner is wrong or vague, correct the misunderstanding using the checkpoint options/feedback and ask a different related follow-up question.
 - Do not answer as a generic CKB/Fiber overview unless the lesson context is missing; connect every outside concept back to this active lesson.
-- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Ethereum developer docs or JoyID docs when relevant.
+- references: 2-3 authoritative links with title,url,reason. Prefer official docs/specs/canonical repos: CKB Docs, Fiber repo, Zcash docs, ZIP-321, Stacks docs, STON.fi docs, TON docs, Ethereum developer docs, or JoyID docs when relevant.
 - Keep answer under 230 words. Keep why_it_matters under 90 words. follow_up_question must be one question tied to this lesson."#,
         module = request.module_title.trim(),
         lesson = request.lesson_title.trim(),
@@ -8324,14 +8668,14 @@ Hard rules:
 - Every field must be authored for this exact request or lesson context. Do not use a generic paywall, generic quiz, stock variable names, or filler prose.
 - For lesson-derived quests, invent names from the lesson. Do not use cellVerifier, verifyCkbCellProof, verifyGeneratedReceipt, src/quest.ts, test/quest.test.ts, ACTIVE_RUN_ID, LESSON_INVARIANT, Fiber Proof Run, Paywall Reactor, or titles ending in Practice Quest.
 - title: specific to the generated quest, max 80 chars.
-- premise: 2 concise sentences explaining the concrete CKB/Fiber risk the learner is practicing.
+- premise: 2 concise sentences explaining the concrete protocol or integration risk the learner is practicing. If the lesson mentions TON, STON.fi, Omniston, or jettons, this must be a TON / STON.fi integration risk.
 - build_objective: concrete objective from the request/lesson, max 420 chars.
 - comprehension_gates: exactly 3 specific gates. Gate 1 explains the invariant. Gate 2 runs or reads the denial test. Gate 3 ships only after defending the generated diff.
 - boss_fight: code-specific challenge tied to the verifier function and denial test.
 - reward_logic: explain when XP/badge/reward claim unlocks, no fake payout promises.
-- ckb_fiber_hooks: exactly 2 concrete hooks, one CKB-side and one Fiber-side.
+- ckb_fiber_hooks: legacy schema name. Return exactly 2 concrete protocol hooks. If the lesson mentions TON, STON.fi, Omniston, or jettons, make them one TON Connect/wallet-state hook and one STON.fi SDK/widget/route hook. Otherwise use one CKB-side and one Fiber-side hook.
 - workbench_files: exactly 2 files. One implementation file and one test file. Each has path, language, content. File paths must be specific to the lesson scenario.
-- implementation content: TypeScript or Rust, 45-95 lines max. Export types and one verifier/settlement function whose name is specific to the lesson. It must mention concrete CKB/Fiber terms such as cell, OutPoint, witness, script, xUDT, invoice, PTLC/HTLC, channel state, nonce, JoyID challenge, receipt, or payout.
+- implementation content: TypeScript or Rust, 45-95 lines max. Export types and one verifier/settlement function whose name is specific to the lesson. It must mention concrete selected-domain terms. For TON / STON.fi lessons, use terms such as TON Connect, manifest, wallet approval, jetton master, jetton wallet, STON.fi, Omniston, quote, route, minOut, slippage, stale quote, referral fee, transaction hash, pending, or confirmed. For CKB/Fiber lessons, use terms such as cell, OutPoint, witness, script, xUDT, invoice, PTLC/HTLC, channel state, nonce, JoyID challenge, receipt, or payout.
 - test content: 35-85 lines max. Import/call the implementation. Include one valid case and at least two denial cases that mutate the exact trusted fields. Use words like reject, block, false, throw, invalid, unpaid, mismatch, or replay.
 - code_explainer must have keys exactly: primary_invariant, denial_path, proof_label, proof_artifact, network_label, network_boundary, risk_focus, inspect_steps, mentor_prompts, resources.
 - code_explainer must be custom to the generated files. inspect_steps has exactly 4 concrete reading steps. mentor_prompts has exactly 4 code-specific learner questions. resources has 2 objects with title, url, reason.
@@ -9526,6 +9870,126 @@ mod tests {
             .e
             .push_str(" ZIP-321 zatoshi Orchard receiver should not leak into a Stacks lesson.");
         assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+    }
+
+    #[test]
+    fn ton_stonfi_learning_request_shapes_sources_validation_and_artifact_tags() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("ton-stonfi-integration-lab".to_string()),
+            ecosystem_id: Some("ton-stonfi".to_string()),
+            topic: Some("STON.fi SDK swap quote and stale quote denial".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec![
+                "Understand the trust boundary".to_string(),
+                "Include interactive code snippets".to_string(),
+            ],
+            interests: vec![
+                "STON.fi SDK".to_string(),
+                "TON Connect".to_string(),
+                "Jetton Verification".to_string(),
+                "Slippage Safety".to_string(),
+            ],
+            learner_goal:
+                "Understand safe STON.fi swap integration with TON Connect and jetton denial tests"
+                    .to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let sentence = "A TON / STON.fi integration must separate the Omniston widget or STON.fi SDK quote from wallet approval and final transaction-state evidence. The builder must verify TON Connect manifest scope, jetton master address, jetton wallet contract assumptions, route, quote timestamp, slippage, min-out, referral fee disclosure, and whether the transaction is pending or confirmed before claiming completion. It should reject unsafe fake jetton metadata, stale quotes, wrong route data, missing min-out, disconnected wallet state, and REST API data treated as settlement proof. ";
+        let lesson = AiLearningLessonCompact {
+            t: "STON.fi quote freshness and TON Connect boundary".to_string(),
+            e: format!(
+                "{} Accuracy check: verify each claim against the official STON.fi documentation, docs.ston.fi DEX SDK, Omniston widget documentation, TON Connect documentation, and TON Jetton documentation before trusting generated swap code. Submodule path: TON Connect manifest -> STON.fi quote -> jetton master allowlist -> slippage min-out -> transaction state denial tests. Further study: read the official STON.fi DEX SDK docs, Omniston widget docs, TON Connect documentation, and TON Jetton documentation.",
+                sentence.repeat(72)
+            ),
+            s: "export function validateStonfiSwapIntent({ quote, jettonMaster, minOut, walletState }) {
+  if (quote.isStale || !minOut) throw new Error('stale-or-unsafe-quote');
+  if (!walletState.tonConnectManifestOk) throw new Error('bad-ton-connect-manifest');
+  return jettonMaster.allowlisted;
+}".to_string(),
+            w: "For a backend developer, this matters because generated STON.fi swap code can confuse a fresh quote, TON Connect approval, jetton metadata, and final transaction state. The learner must verify source-backed fields before accepting a swap as safe or complete.".to_string(),
+            j: "Build a STON.fi swap verifier artifact with denial tests for stale quotes, fake jetton master addresses, missing min-out, wrong TON Connect manifest, and pending transaction state.".to_string(),
+            f: "Which field would you mutate first to prove the swap flow rejects stale or spoofed evidence?".to_string(),
+            q: "Which STON.fi quote, route, TON Connect manifest, jetton master address, min-out, slippage, referral fee, and transaction state fields form the swap proof boundary?".to_string(),
+            a: "The source-backed quote and route, TON Connect manifest scope, verified jetton master, min-out/slippage constraints, disclosed fee, and confirmed transaction state".to_string(),
+            b: vec![
+                "The token symbol and frontend success toast".to_string(),
+                "Any REST API response with a price".to_string(),
+                "A connected wallet icon alone".to_string(),
+            ],
+            bf: vec![
+                "Token symbol and UI state can be spoofed; the lesson requires jetton master and transaction evidence.".to_string(),
+                "A REST response can inform a quote, but it is not final settlement proof.".to_string(),
+                "A connected wallet starts authorization UX; it does not prove the user approved this exact swap.".to_string(),
+            ],
+            ci: 2,
+        };
+
+        assert_eq!(learning_ecosystem_label(&request), "TON / STON.fi");
+        assert!(learning_focus_label(&request).contains("STON.fi SDK swap quote"));
+        assert!(
+            learning_module_capstone_prompt(&request).contains("TON / STON.fi integration quest")
+        );
+        assert!(learning_focus_directive(&request).contains("STON.fi DEX SDK"));
+        assert!(learning_source_grounding_directive(&request).contains("docs.ston.fi"));
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &lesson).is_ok());
+        assert!(
+            infer_learning_concepts("TON / STON.fi", &lesson)
+                .iter()
+                .any(|concept| concept == "TON Connect")
+        );
+        assert!(
+            default_learning_resources_for_focus("TON / STON.fi STON.fi SDK")
+                .iter()
+                .any(|resource| resource.title == "STON.fi DEX SDK Documentation")
+        );
+
+        let mut leaked = lesson.clone();
+        leaked.e.push_str(
+            " ZIP-321 zatoshi Orchard receiver and Clarity contract claims do not belong here.",
+        );
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons: vec![
+                compact_ai_lesson_to_learning_lesson(
+                    0,
+                    "Backend dev",
+                    "TON / STON.fi",
+                    &request,
+                    lesson,
+                )
+                .unwrap(),
+            ],
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources: default_learning_resources_for_focus("TON / STON.fi"),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+        let artifact = learning_eval_artifact(&request, &module, provider);
+        assert_eq!(artifact.ecosystem_id, "ton-stonfi");
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "ton-connect")
+        );
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "quote-freshness")
+        );
     }
 
     #[test]
