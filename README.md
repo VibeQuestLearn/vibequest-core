@@ -71,6 +71,12 @@ Every ecosystem track must be represented as a reviewed package with:
 
 Track-specific protocol behavior stays behind explicit adapters. A track may cite ecosystem sources, expose code lenses, or provide scenario cases, but it cannot define identity, ownership, persistence, or global completion behavior.
 
+## Source-Grounded AI Tracks
+
+AI-generated tracks use the same global validation contract across ecosystems: official-source grounding, minimum depth, repetition checks, checkpoint quality, placeholder rejection, learner-intent alignment, and persisted evaluation artifacts. The artifact now records source IDs, source categories, code-mode state, denial-test coverage, final-lab readiness, and unsupported-claim warnings so Web can expose why a generated lesson is trusted enough to show.
+
+The TON / STON.fi track uses an expanded source pack covering STON.fi DEX overview, SDK, smart contracts, REST API, Omniston widget, Omniston SDK, TON Connect, TON Connect UI, TON token standards, and jetton processing/interface/architecture. Validation treats SDK/widget/REST outputs as integration inputs, not settlement proof, and expects denial cases for fake jettons, stale quotes, unsafe min-out, wallet rejection, manifest mismatch, duplicate connector state, referral-fee disclosure, and pending transaction state.
+
 ## Current Reviewed Track: Zcash Shielded Payments
 
 `src/zcash` is a network-free verifier boundary for the shielded-checkout track. It uses exact official crate versions to inspect Revision 0 Unified Addresses, enforce receiver and network policy, validate bounded ZIP-321 ZEC requests, classify Unified Viewing Keys, and evaluate reviewed payment lifecycle fixtures.
