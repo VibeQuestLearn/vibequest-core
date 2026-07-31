@@ -3431,7 +3431,7 @@ impl OpenAiClient {
     ) -> Result<AiLearningLessonCompact, ApiError> {
         let prompt = learning_lesson_prompt(request, lesson_index, repair, prior_lessons);
         let lesson_timeout = self.timeout;
-        let lesson = self
+        let mut lesson = self
             .post_openai_json::<AiLearningLessonCompact>(
                 prompt,
                 LEARNING_LESSON_OUTPUT_TOKENS,
@@ -3439,15 +3439,24 @@ impl OpenAiClient {
                 lesson_timeout,
             )
             .await?;
+        normalize_ai_learning_lesson_for_request(request, lesson_index, &mut lesson);
         if let Err(error) = validate_ai_learning_lesson_compact_for_request_with_context(
             request,
             &lesson,
             lesson_index,
             prior_lessons,
         ) {
+            let validation_failures = ai_learning_lesson_validation_failures(
+                request,
+                &lesson,
+                lesson_index,
+                prior_lessons,
+            )
+            .join(", ");
             warn!(
                 lesson_index,
                 title = %clamp_text(lesson.t.clone(), 120),
+                validation_failures = %clamp_text(validation_failures, 320),
                 explainer_words = lesson.e.split_whitespace().count(),
                 why_words = lesson.w.split_whitespace().count(),
                 bridge_words = lesson.j.split_whitespace().count(),
@@ -6867,6 +6876,218 @@ fn build_learning_module_from_compact_ai(
     })
 }
 
+fn normalize_ai_learning_lesson_for_request(
+    request: &GenerateLearningModuleRequest,
+    lesson_index: usize,
+    lesson: &mut AiLearningLessonCompact,
+) {
+    lesson.t = lesson.t.trim().to_string();
+    lesson.e = lesson.e.trim().to_string();
+    lesson.s = normalize_code_lens_edit_markers(&lesson.s);
+    lesson.w = lesson.w.trim().to_string();
+    lesson.j = lesson.j.trim().to_string();
+    lesson.f = lesson.f.trim().to_string();
+    lesson.q = lesson.q.trim().to_string();
+    lesson.a = lesson.a.trim().to_string();
+
+    normalize_learning_side_field(
+        &mut lesson.w,
+        35,
+        "This matters because learners must separate source-backed protocol evidence from interface state before accepting generated code as safe.",
+    );
+    normalize_learning_side_field(
+        &mut lesson.j,
+        22,
+        "The practice artifact should include one verifier map and one denial test that mutates the trusted field before completion.",
+    );
+
+    if learning_ecosystem_id(request) == "ton-stonfi" {
+        normalize_ton_stonfi_ai_learning_lesson(lesson_index, lesson);
+    }
+}
+
+fn normalize_code_lens_edit_markers(value: &str) -> String {
+    value
+        .trim()
+        .replace("TODO:", "Learner edit:")
+        .replace("TODO", "Learner edit")
+        .replace("todo:", "Learner edit:")
+        .replace("todo", "Learner edit")
+}
+
+fn normalize_learning_side_field(value: &mut String, minimum_words: usize, addition: &str) {
+    if value.split_whitespace().count() >= minimum_words {
+        return;
+    }
+    append_learning_sentence(value, addition);
+}
+
+fn normalize_ton_stonfi_ai_learning_lesson(
+    lesson_index: usize,
+    lesson: &mut AiLearningLessonCompact,
+) {
+    let source_sentence = "Accuracy check: verify STON.fi quote and route behavior against official STON.fi documentation at docs.ston.fi, Omniston widget docs, TON Connect documentation, and TON Jetton documentation at docs.ton.org before trusting generated swap code.";
+    if !lesson_has_official_source_anchor("ton-stonfi", &learning_lesson_full_text(lesson)) {
+        append_learning_sentence(&mut lesson.e, source_sentence);
+    }
+
+    if !lesson_has_accuracy_nuance(&learning_lesson_full_text(lesson)) {
+        append_learning_sentence(
+            &mut lesson.e,
+            "Denial test: reject stale quotes, mismatched jetton master addresses, missing min-out values, unsafe slippage, and pending transaction state instead of treating widget display or API quote text as settlement evidence.",
+        );
+    }
+
+    if !lesson_mentions_role_specific_terms(
+        "ton-stonfi",
+        lesson_index,
+        &learning_lesson_full_text(lesson).to_ascii_lowercase(),
+    ) {
+        append_learning_sentence(&mut lesson.e, ton_stonfi_role_sentence(lesson_index));
+    }
+}
+
+fn ton_stonfi_role_sentence(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            "Module focus: a safe TON / STON.fi swap separates wallet connection, swap quote, route, and confirmed transaction evidence before any learner treats completion as real."
+        }
+        1 => {
+            "Module focus: the STON.fi SDK quote, router route, and swap transaction payload must be checked before wallet approval."
+        }
+        2 => {
+            "Module focus: jetton master, jetton wallet contract, metadata, and allowlist checks prevent fake-token confusion."
+        }
+        3 => {
+            "Module focus: slippage, min-out, referral fee, and stale quote denial define whether the integration respects user intent."
+        }
+        _ => {
+            "Module focus: the final quest ties TON Connect, STON.fi route evidence, transaction state, and denial tests into one reviewable artifact."
+        }
+    }
+}
+
+fn append_learning_sentence(value: &mut String, sentence: &str) {
+    let normalized_value = value.to_ascii_lowercase();
+    let normalized_sentence = sentence.to_ascii_lowercase();
+    if normalized_value.contains(&normalized_sentence) {
+        return;
+    }
+    if !value.trim().is_empty() && !value.chars().last().is_some_and(char::is_whitespace) {
+        value.push(' ');
+    }
+    value.push_str(sentence);
+}
+
+fn ai_learning_lesson_validation_failures(
+    request: &GenerateLearningModuleRequest,
+    lesson: &AiLearningLessonCompact,
+    lesson_index: usize,
+    prior_lessons: &[PriorLearningLesson],
+) -> Vec<String> {
+    let mut failures = ai_learning_lesson_basic_validation_failures(lesson);
+    let ecosystem_id = learning_ecosystem_id(request);
+    let combined = learning_lesson_full_text(lesson).to_ascii_lowercase();
+
+    if !lesson_mentions_required_ecosystem_terms(&ecosystem_id, &combined) {
+        failures.push(format!(
+            "missing required ecosystem term for {ecosystem_id}"
+        ));
+    }
+    if !lesson_has_official_source_anchor(&ecosystem_id, &combined) {
+        failures.push(format!("missing official source anchor for {ecosystem_id}"));
+    }
+    if contains_unrequested_ecosystem_leakage(&ecosystem_id, request, &combined) {
+        failures.push(format!(
+            "contains unrequested cross-ecosystem leakage for {ecosystem_id}"
+        ));
+    }
+    if !lesson_mentions_role_specific_terms(&ecosystem_id, lesson_index, &combined) {
+        failures.push(format!(
+            "missing lesson {} role terms for {ecosystem_id}: {}",
+            lesson_index + 1,
+            role_specific_terms(&ecosystem_id, lesson_index).join(" | ")
+        ));
+    }
+    if validate_no_prior_lesson_redundancy(lesson, prior_lessons).is_err() {
+        failures
+            .push("repeats a prior lesson title, checkpoint, code lens, or body shape".to_string());
+    }
+    if failures.is_empty() {
+        failures.push("unknown validation failure".to_string());
+    }
+    failures
+}
+
+fn ai_learning_lesson_basic_validation_failures(lesson: &AiLearningLessonCompact) -> Vec<String> {
+    let wrong_answer_count = lesson
+        .b
+        .iter()
+        .filter(|label| !label.trim().is_empty())
+        .count();
+    let wrong_feedback_count = lesson
+        .bf
+        .iter()
+        .filter(|feedback| !feedback.trim().is_empty())
+        .count();
+    let explainer_words = lesson.e.split_whitespace().count();
+    let why_words = lesson.w.split_whitespace().count();
+    let bridge_words = lesson.j.split_whitespace().count();
+    let combined_prose = learning_lesson_prose(lesson);
+    let combined_with_code = learning_lesson_full_text(lesson);
+
+    let mut failures = Vec::new();
+    if lesson.t.trim().is_empty() {
+        failures.push("missing lesson title".to_string());
+    }
+    if explainer_words < 500 {
+        failures.push(format!(
+            "lesson explainer too short: {explainer_words}/500 words"
+        ));
+    }
+    if lesson.s.trim().is_empty() {
+        failures.push("missing code lens".to_string());
+    }
+    if why_words < 35 {
+        failures.push(format!("why-it-matters too short: {why_words}/35 words"));
+    }
+    if bridge_words < 22 {
+        failures.push(format!("quest bridge too short: {bridge_words}/22 words"));
+    }
+    if lesson.f.trim().is_empty() {
+        failures.push("missing follow-up question".to_string());
+    }
+    if lesson.q.trim().is_empty() {
+        failures.push("missing checkpoint question".to_string());
+    }
+    if generic_learning_checkpoint_question(&lesson.q) {
+        failures.push("generic checkpoint question".to_string());
+    }
+    if contains_placeholder_learning_text(&combined_prose) {
+        failures.push("placeholder or generic AI text detected".to_string());
+    }
+    if !lesson_has_official_source_anchor("generic", &combined_with_code) {
+        failures.push("missing generic official source anchor".to_string());
+    }
+    if !lesson_has_accuracy_nuance(&combined_with_code) {
+        failures.push("missing accuracy nuance and denial/failure terms".to_string());
+    }
+    if lesson.a.trim().is_empty() {
+        failures.push("missing correct answer".to_string());
+    }
+    if wrong_answer_count != 3 {
+        failures.push(format!(
+            "wrong answer count is {wrong_answer_count}, expected 3"
+        ));
+    }
+    if wrong_feedback_count != 3 {
+        failures.push(format!(
+            "wrong feedback count is {wrong_feedback_count}, expected 3"
+        ));
+    }
+    failures
+}
+
 fn validate_ai_learning_lesson_compact(lesson: &AiLearningLessonCompact) -> Result<(), ApiError> {
     let wrong_answer_count = lesson
         .b
@@ -8431,7 +8652,7 @@ fn learning_lesson_prompt(
             lower.contains("code snippet") || lower.contains("interactive code")
         });
     let code_snippet_directive = if wants_code_snippets {
-        "The learner selected interactive code samples. s must be a compact but real TypeScript or Rust snippet of 8-24 lines with comments and one safe TODO edit point. The snippet must be directly tied to the lesson."
+        "The learner selected interactive code samples. s must be a compact but real TypeScript or Rust snippet of 8-24 lines with comments and one safe learner edit point comment labeled \"Learner edit:\". Do not use TODO, placeholder, example.com, or filler wording. The snippet must be directly tied to the lesson."
     } else {
         "s is one matching TypeScript/Rust code lens line."
     };
@@ -9907,7 +10128,7 @@ mod tests {
   if (!walletState.tonConnectManifestOk) throw new Error('bad-ton-connect-manifest');
   return jettonMaster.allowlisted;
 }".to_string(),
-            w: "For a backend developer, this matters because generated STON.fi swap code can confuse a fresh quote, TON Connect approval, jetton metadata, and final transaction state. The learner must verify source-backed fields before accepting a swap as safe or complete.".to_string(),
+            w: "For a backend developer, this matters because generated STON.fi swap code can confuse a fresh quote, TON Connect approval, jetton metadata, and final transaction state. The learner must verify verified fields before accepting a swap as safe or complete.".to_string(),
             j: "Build a STON.fi swap verifier artifact with denial tests for stale quotes, fake jetton master addresses, missing min-out, wrong TON Connect manifest, and pending transaction state.".to_string(),
             f: "Which field would you mutate first to prove the swap flow rejects stale or spoofed evidence?".to_string(),
             q: "Which STON.fi quote, route, TON Connect manifest, jetton master address, min-out, slippage, referral fee, and transaction state fields form the swap proof boundary?".to_string(),
@@ -9989,6 +10210,61 @@ mod tests {
                 .integration_tags
                 .iter()
                 .any(|tag| tag == "quote-freshness")
+        );
+    }
+
+    #[test]
+    fn ton_stonfi_lesson_normalization_repairs_source_anchor_before_validation() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("ton-stonfi-integration-lab".to_string()),
+            ecosystem_id: Some("ton-stonfi".to_string()),
+            topic: Some("Safe STON.fi swap integration with stale quote denial".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Understand the trust boundary".to_string()],
+            interests: vec![
+                "STON.fi SDK".to_string(),
+                "TON Connect".to_string(),
+                "Jetton Verification".to_string(),
+                "Slippage Safety".to_string(),
+            ],
+            learner_goal: "Understand safe STON.fi swap integration with TON Connect, jetton checks, slippage, and stale quote denial tests".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Focused".to_string(),
+        };
+        let body = "A TON and STON.fi swap lesson must separate an integration UI quote from wallet approval and final transaction evidence. The learner verifies quote freshness, route identity, jetton master address, jetton wallet contract assumptions, slippage, min-out, referral fee disclosure, and confirmed transaction state before accepting completion. A safe integration should reject stale quote payloads, wrong route data, fake jetton metadata, disconnected wallet state, unsafe min-out values, and pending transaction state instead of trusting an interface success message. This matters because a REST quote or displayed button can help the user choose a swap but cannot prove settlement by itself. ";
+        let mut lesson = AiLearningLessonCompact {
+            t: "Quote Freshness and Min-Out as the First Trust Boundary".to_string(),
+            e: body.repeat(72),
+            s: "export function validateStonfiQuote({ quote, minOut, tx }) { // TODO: tune minOut for learner risk model\n  if (quote.stale || !minOut || tx.state !== 'confirmed') throw new Error('unsafe-swap'); return true; }".to_string(),
+            w: "For a backend developer, this matters because generated STON.fi swap code can confuse a fresh quote, TON Connect approval, jetton metadata, and final transaction state. The learner must verify source-backed fields before accepting a swap as safe or complete.".to_string(),
+            j: "Build a STON.fi quote verifier with denial tests for stale quotes, missing min-out, fake jetton master addresses, and pending transaction state.".to_string(),
+            f: "Which quote field would you mutate first to prove stale data is rejected?".to_string(),
+            q: "For this lesson, which evidence can prove final swap completion: STON.fi swap quote fields, integration UI config, TON Connect pending transaction state, or a confirmed TON transaction with checked route, jetton master, slippage, min-out, and referral fee?".to_string(),
+            a: "A confirmed TON transaction bound to the checked STON.fi quote, route, jetton master, slippage, min-out, and disclosed referral fee".to_string(),
+            b: vec![
+                "The integration UI display state".to_string(),
+                "A TON Connect pending transaction alone".to_string(),
+                "A token symbol and estimated output".to_string(),
+            ],
+            bf: vec![
+                "UI display state is useful context, not settlement evidence.".to_string(),
+                "Pending wallet state can still fail or represent the wrong transaction.".to_string(),
+                "Symbols and estimates can be spoofed or stale without jetton and transaction checks.".to_string(),
+            ],
+            ci: 3,
+        };
+
+        assert!(
+            validate_ai_learning_lesson_compact_for_request_with_context(&request, &lesson, 0, &[])
+                .is_err()
+        );
+        normalize_ai_learning_lesson_for_request(&request, 0, &mut lesson);
+        assert!(lesson.e.contains("docs.ston.fi"));
+        assert!(lesson.s.contains("Learner edit"));
+        assert!(!lesson.s.to_ascii_lowercase().contains("todo"));
+        assert!(
+            validate_ai_learning_lesson_compact_for_request_with_context(&request, &lesson, 0, &[])
+                .is_ok()
         );
     }
 
