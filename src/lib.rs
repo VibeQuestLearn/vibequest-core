@@ -7342,9 +7342,21 @@ fn normalize_ton_stonfi_ai_learning_lesson(
         append_learning_sentence(&mut lesson.e, ton_stonfi_role_sentence(lesson_index));
     }
 
+    if lesson_index >= 4 {
+        append_learning_sentence(&mut lesson.e, ton_stonfi_final_lab_denial_checklist());
+        append_learning_sentence(
+            &mut lesson.j,
+            "Final lab artifact: a reviewed safe-swap proof map plus denial tests for fake jettons, stale quotes, unsafe min-out, wallet rejection, manifest mismatch, duplicate connector state, hidden fees, pending-as-success, and REST API settlement assumptions.",
+        );
+    }
+
     if wants_code_snippets_for_request(request) {
         lesson.s = ton_stonfi_curated_code_lens(lesson_index).to_string();
     }
+}
+
+fn ton_stonfi_final_lab_denial_checklist() -> &'static str {
+    "Final lab denial checklist: fake jetton master address, misleading token metadata, changed token pair after quote, stale quote timestamp, missing min-out, min-out set too low, wallet disconnected before submission, rejected wallet approval, pending transaction treated as success, wrong TON Connect manifest domain, duplicate TON Connect connector state, missing referral-fee disclosure, and REST API response treated as settlement proof."
 }
 
 fn ton_stonfi_curated_code_lens(lesson_index: usize) -> &'static str {
@@ -7389,10 +7401,18 @@ export function canStartStonfiSwap(wallet) {
             r#"export function finalStonfiLabChecks(state) {
   const failures = [];
   if (state.fakeJettonMaster) failures.push('fake-jetton-master');
-  if (state.staleQuote) failures.push('stale-quote');
-  if (state.pendingTreatedAsSuccess) failures.push('pending-not-success');
-  if (!state.referralFeeDisclosed) failures.push('fee-disclosure-missing');
-  if (state.restApiUsedAsSettlementProof) failures.push('rest-api-not-settlement-proof');
+  if (state.misleadingTokenMetadata) failures.push('misleading-token-metadata');
+  if (state.changedTokenPairAfterQuote) failures.push('changed-token-pair');
+  if (state.staleQuoteTimestamp) failures.push('stale-quote');
+  if (!state.minOut) failures.push('missing-min-out');
+  if (state.minOutTooLow) failures.push('unsafe-min-out');
+  if (state.walletDisconnected) failures.push('wallet-disconnected');
+  if (state.rejectedWalletApproval) failures.push('wallet-rejection');
+  if (state.pendingTransactionTreatedAsSuccess) failures.push('pending-transaction-not-success');
+  if (state.wrongTonConnectManifestDomain) failures.push('wrong-ton-connect-manifest-domain');
+  if (state.duplicateTonConnectConnectorState) failures.push('duplicate-ton-connect-connector-state');
+  if (!state.referralFeeDisclosed) failures.push('referral-fee-disclosure-missing');
+  if (state.restApiResponseUsedAsSettlementProof) failures.push('rest-api-response-not-settlement-proof');
   return { pass: failures.length === 0, failures };
 }"#
         }
@@ -10888,6 +10908,85 @@ mod tests {
             validate_ai_learning_lesson_compact_for_request_with_context(&request, &lesson, 0, &[])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn ton_stonfi_final_module_normalization_adds_reviewed_denial_checklist() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("ton-stonfi-integration-lab".to_string()),
+            ecosystem_id: Some("ton-stonfi".to_string()),
+            topic: Some("Final STON.fi safe-swap integration lab".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Include code snippets".to_string()],
+            interests: vec![
+                "STON.fi SDK".to_string(),
+                "TON Connect".to_string(),
+                "Jetton Verification".to_string(),
+                "Slippage Safety".to_string(),
+            ],
+            learner_goal:
+                "Review a safe STON.fi swap integration with source-grounded denial tests"
+                    .to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let body = "A final TON and STON.fi safe-swap lab ties a swap route, quote freshness, wallet approval, jetton master verification, min-out, slippage, referral fee disclosure, and confirmed transaction evidence into one reviewable artifact. The lesson explicitly rejects fake jetton metadata, stale quotes, wrong route data, pending transaction state, and REST API output treated as settlement evidence while using official STON.fi and TON documentation as the source grounding. Accuracy check: verify each claim against docs.ston.fi and docs.ton.org before trusting the generated integration. Submodule path: quote boundary -> wallet boundary -> jetton identity -> transaction state -> final denial matrix. Further study: read STON.fi DEX SDK, Omniston SDK, TON Connect, and TON Jetton documentation. ";
+        let mut lesson = AiLearningLessonCompact {
+            t: "Final STON.fi safe-swap lab".to_string(),
+            e: body.repeat(56),
+            s: "export function incompleteFinalLab(state) { return state.confirmed; }".to_string(),
+            w: "For a backend developer, this matters because the final lab proves the learner can separate STON.fi integration inputs from confirmed TON transaction evidence before trusting generated code.".to_string(),
+            j: "Build the final STON.fi swap proof map and denial matrix.".to_string(),
+            f: "Which final denial case should fail before wallet approval?".to_string(),
+            q: "Which STON.fi route, jetton master, min-out, TON Connect manifest, referral fee, and transaction state evidence makes the final safe-swap lab trustworthy?".to_string(),
+            a: "A confirmed transaction bound to checked route, jetton master, min-out, manifest scope, disclosed fee, and denial-test coverage".to_string(),
+            b: vec![
+                "A widget success label".to_string(),
+                "A token symbol and REST quote".to_string(),
+                "A connected wallet icon".to_string(),
+            ],
+            bf: vec![
+                "Widget labels are not settlement proof.".to_string(),
+                "Symbols and REST quotes are not final proof.".to_string(),
+                "Connection is not approval or settlement.".to_string(),
+            ],
+            ci: 0,
+        };
+
+        normalize_ai_learning_lesson_for_request(&request, 4, &mut lesson);
+        let normalized_text = learning_lesson_full_text(&lesson).to_ascii_lowercase();
+        assert!(normalized_text.contains("fake jetton master address"));
+        assert!(normalized_text.contains("duplicate ton connect connector state"));
+        assert!(lesson.s.contains("restApiResponseUsedAsSettlementProof"));
+
+        let final_lesson = compact_ai_lesson_to_learning_lesson(
+            4,
+            "Backend dev",
+            "TON / STON.fi",
+            &request,
+            lesson,
+        )
+        .unwrap();
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons: vec![final_lesson],
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources: default_learning_resources_for_focus("TON / STON.fi"),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+        let artifact = learning_eval_artifact(&request, &module, provider);
+        assert!(artifact.final_lab_ready);
+        assert!(artifact.denial_tests_count >= 8);
     }
 
     #[test]
