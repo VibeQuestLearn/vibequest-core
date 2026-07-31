@@ -429,6 +429,18 @@ struct LearningEvalArtifact {
     warnings: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     integration_tags: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    source_ids: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    source_categories: Vec<String>,
+    #[serde(default)]
+    code_mode_enabled: bool,
+    #[serde(default)]
+    final_lab_ready: bool,
+    #[serde(default)]
+    denial_tests_count: usize,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    unsupported_claim_warnings: Vec<String>,
     generated_at: DateTime<Utc>,
 }
 
@@ -440,6 +452,10 @@ struct LearningLessonEvalReport {
     quality_score: LearningQualityScore,
     source_titles: Vec<String>,
     source_urls: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    source_ids: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    source_categories: Vec<String>,
     warning_count: usize,
 }
 
@@ -2500,8 +2516,18 @@ fn compact_learning_eval_artifact(
             .map(compact_learning_lesson_eval_report)
             .take(lesson_report_limit)
             .collect(),
-        warnings: compact_string_list(artifact.warnings, 12, 220),
+        warnings: compact_string_list(artifact.warnings, 16, 220),
         integration_tags: compact_string_list(artifact.integration_tags, 12, 80),
+        source_ids: compact_string_list(artifact.source_ids, 16, 80),
+        source_categories: compact_string_list(artifact.source_categories, 12, 80),
+        code_mode_enabled: artifact.code_mode_enabled,
+        final_lab_ready: artifact.final_lab_ready,
+        denial_tests_count: artifact.denial_tests_count.min(99),
+        unsupported_claim_warnings: compact_string_list(
+            artifact.unsupported_claim_warnings,
+            16,
+            220,
+        ),
         generated_at: artifact.generated_at,
     }
 }
@@ -2516,6 +2542,8 @@ fn compact_learning_lesson_eval_report(
         quality_score: report.quality_score,
         source_titles: compact_string_list(report.source_titles, 8, 100),
         source_urls: compact_string_list(report.source_urls, 8, 220),
+        source_ids: compact_string_list(report.source_ids, 12, 80),
+        source_categories: compact_string_list(report.source_categories, 10, 80),
         warning_count: report.warning_count.min(99),
     }
 }
@@ -2530,6 +2558,307 @@ fn compact_ai_provider_metadata(provider: AiProviderMetadata) -> AiProviderMetad
         timeout_seconds: provider.timeout_seconds.min(600),
         configured: provider.configured,
     }
+}
+
+fn wants_code_snippets_for_request(request: &GenerateLearningModuleRequest) -> bool {
+    request
+        .learning_intents
+        .iter()
+        .chain(request.interests.iter())
+        .any(|item| {
+            let lower = item.to_ascii_lowercase();
+            lower.contains("code snippet")
+                || lower.contains("interactive code")
+                || lower.contains("code sample")
+        })
+}
+
+fn learning_source_ids_for_module(module: &LearningModule) -> Vec<String> {
+    let urls = module
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .chain(
+            module
+                .lessons
+                .iter()
+                .flat_map(|lesson| unique_learning_source_urls(lesson)),
+        )
+        .collect::<Vec<_>>();
+    learning_source_ids_from_urls(&urls)
+}
+
+fn learning_source_ids_from_urls(urls: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ids = Vec::new();
+    for url in urls {
+        if let Some(id) = learning_source_id_for_url(url) {
+            if seen.insert(id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn learning_source_id_for_url(url: &str) -> Option<&'static str> {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("docs.ston.fi/developer-section/dex/overview") {
+        Some("stonfi-dex-overview")
+    } else if lower.contains("docs.ston.fi/developer-section/dex/sdk") {
+        Some("stonfi-dex-sdk")
+    } else if lower.contains("docs.ston.fi/developer-section/dex/smart-contracts") {
+        Some("stonfi-dex-smart-contracts")
+    } else if lower.contains("docs.ston.fi/developer-section/dex/api") {
+        Some("stonfi-dex-rest-api")
+    } else if lower.contains("docs.ston.fi/developer-section/widget/widget") {
+        Some("stonfi-omniston-widget-guide")
+    } else if lower.contains("docs.ston.fi/developer-section/widget") {
+        Some("stonfi-omniston-widget")
+    } else if lower.contains("docs.ston.fi/developer-section/omniston/sdk") {
+        Some("stonfi-omniston-sdk")
+    } else if lower.contains("docs.ton.org/applications/ton-connect/api-reference/ui") {
+        Some("ton-connect-ui")
+    } else if lower.contains("docs.ton.org/applications/ton-connect/overview") {
+        Some("ton-connect-overview")
+    } else if lower.contains("docs.ton.org/contracts/standard/tokens/overview") {
+        Some("ton-token-overview")
+    } else if lower.contains("docs.ton.org/applications/payments/jettons") {
+        Some("ton-jetton-processing")
+    } else if lower.contains("docs.ton.org/contracts/standard/tokens/jettons/api") {
+        Some("ton-jetton-interface")
+    } else if lower.contains("docs.ton.org/contracts/standard/tokens/jettons/how-it-works") {
+        Some("ton-jetton-architecture")
+    } else if lower.contains("docs.stacks.co") {
+        Some("stacks-docs")
+    } else if lower.contains("zcash.readthedocs") {
+        Some("zcash-docs")
+    } else if lower.contains("zips.z.cash/zip-0321") {
+        Some("zcash-zip-321")
+    } else if lower.contains("docs.nervos.org") {
+        Some("ckb-docs")
+    } else if lower.contains("github.com/nervosnetwork/fiber") {
+        Some("fiber-repo")
+    } else if lower.contains("ethereum.org/developers/docs") {
+        Some("ethereum-developer-docs")
+    } else {
+        None
+    }
+}
+
+fn learning_source_categories_from_ids(ids: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut categories = Vec::new();
+    for id in ids {
+        let category = learning_source_category_for_id(id);
+        if seen.insert(category) {
+            categories.push(category.to_string());
+        }
+    }
+    categories
+}
+
+fn learning_source_category_for_id(id: &str) -> &'static str {
+    match id {
+        "stonfi-dex-overview" | "stonfi-dex-smart-contracts" => "stonfi-dex",
+        "stonfi-dex-sdk" => "stonfi-sdk",
+        "stonfi-dex-rest-api" => "rest-api",
+        "stonfi-omniston-widget" | "stonfi-omniston-widget-guide" => "omniston-widget",
+        "stonfi-omniston-sdk" => "omniston-sdk",
+        "ton-connect-overview" | "ton-connect-ui" => "ton-connect",
+        "ton-token-overview"
+        | "ton-jetton-processing"
+        | "ton-jetton-interface"
+        | "ton-jetton-architecture" => "jetton-standard",
+        "stacks-docs" => "stacks",
+        "zcash-docs" | "zcash-zip-321" => "zcash",
+        "ckb-docs" => "ckb",
+        "fiber-repo" => "fiber",
+        "ethereum-developer-docs" => "web3-basics",
+        _ => "source-pack",
+    }
+}
+
+fn learning_unsupported_claim_warnings(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> Vec<String> {
+    if learning_ecosystem_id(request) != "ton-stonfi" {
+        return Vec::new();
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let mut warnings = Vec::new();
+
+    if risky_phrase_present(
+        &combined,
+        &[
+            "widget proves",
+            "widget confirms",
+            "widget output proves",
+            "sdk response proves",
+            "sdk output proves",
+        ],
+    ) {
+        warnings.push("SDK/widget output is being treated as settlement proof; require wallet and transaction-state evidence.".to_string());
+    }
+    if (combined.contains("token symbol")
+        || combined.contains("token name")
+        || combined.contains("token image"))
+        && !(combined.contains("jetton master")
+            || combined.contains("master address")
+            || combined.contains("allowlist"))
+    {
+        warnings.push(
+            "Token metadata appears without jetton master or allowlist verification.".to_string(),
+        );
+    }
+    if combined.contains("ton connect") && !combined.contains("manifest") {
+        warnings.push(
+            "TON Connect is mentioned without manifest or domain-boundary constraints.".to_string(),
+        );
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "pending transaction is success",
+            "pending state is success",
+            "pending transaction proves",
+            "pending proves",
+        ],
+    ) {
+        warnings.push("Pending transaction state is being treated as success; require confirmed transaction evidence.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "rest api proves",
+            "api response proves",
+            "quote response proves",
+            "rest response confirms settlement",
+        ],
+    ) {
+        warnings.push("REST API response is being treated as final on-chain proof.".to_string());
+    }
+    if combined.contains("referral") && combined.contains("fee") && !combined.contains("disclos") {
+        warnings.push(
+            "Referral fee is mentioned without clear disclosure to preserve user intent."
+                .to_string(),
+        );
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "production safe",
+            "safe for production",
+            "ship to production",
+        ],
+    ) && learning_denial_test_count(request, module) < 2
+    {
+        warnings.push(
+            "Production-safety claim appears without enough denial-test coverage.".to_string(),
+        );
+    }
+
+    warnings
+}
+
+fn risky_phrase_present(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| text.contains(*phrase))
+}
+
+fn learning_module_full_text(module: &LearningModule) -> String {
+    format!(
+        "{} {} {}",
+        module.title,
+        module.outcome,
+        module
+            .lessons
+            .iter()
+            .map(|lesson| format!(
+                "{} {} {} {} {} {}",
+                lesson.title,
+                lesson.explanation,
+                lesson.why_it_matters,
+                lesson.quest_bridge,
+                lesson.checkpoint.question,
+                lesson.concepts.join(" ")
+            ))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn learning_denial_test_count(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> usize {
+    if learning_ecosystem_id(request) != "ton-stonfi" {
+        return module
+            .lessons
+            .iter()
+            .map(|lesson| {
+                usize::from(
+                    lesson
+                        .explanation
+                        .to_ascii_lowercase()
+                        .contains("denial test"),
+                )
+            })
+            .sum();
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let denial_cases = [
+        ["fake jetton", "fake-token", "fake token"].as_slice(),
+        ["misleading token metadata", "token metadata"].as_slice(),
+        ["changed token pair", "mutate token pair", "wrong pair"].as_slice(),
+        ["stale quote", "quote timestamp"].as_slice(),
+        ["missing min-out", "missing minout"].as_slice(),
+        ["min-out set too low", "unsafe min-out", "unsafe minout"].as_slice(),
+        ["wallet disconnected", "disconnected wallet"].as_slice(),
+        ["rejected wallet", "wallet rejection", "approval rejected"].as_slice(),
+        ["pending transaction", "pending state"].as_slice(),
+        [
+            "wrong ton connect manifest",
+            "manifest domain",
+            "wrong manifest",
+        ]
+        .as_slice(),
+        [
+            "duplicate ton connect",
+            "duplicate connector",
+            "duplicate instance",
+        ]
+        .as_slice(),
+        ["referral fee", "referrer fee"].as_slice(),
+        ["rest api response", "api response", "rest response"].as_slice(),
+    ];
+    denial_cases
+        .iter()
+        .filter(|terms| terms.iter().any(|term| combined.contains(*term)))
+        .count()
+}
+
+fn learning_final_lab_ready(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "ton-stonfi" || module.lessons.len() < 5 {
+        return false;
+    }
+    let final_lesson = module.lessons.last().map(|lesson| {
+        format!(
+            "{} {} {} {}",
+            lesson.title, lesson.explanation, lesson.quest_bridge, lesson.checkpoint.question
+        )
+        .to_ascii_lowercase()
+    });
+    final_lesson.is_some_and(|text| {
+        (text.contains("final") || text.contains("lab") || text.contains("quest"))
+            && text.contains("ston.fi")
+            && text.contains("denial")
+            && text.contains("transaction")
+            && learning_denial_test_count(request, module) >= 8
+    })
 }
 
 fn learning_integration_tags(request: &GenerateLearningModuleRequest) -> Vec<String> {
@@ -2584,7 +2913,11 @@ fn learning_eval_artifact(
         .map(learning_lesson_eval_report)
         .collect::<Vec<_>>();
     let validation = validation_state_from_module(module);
-    let warnings = learning_eval_warnings(module, &validation, &lesson_reports);
+    let mut warnings = learning_eval_warnings(module, &validation, &lesson_reports);
+    let unsupported_claim_warnings = learning_unsupported_claim_warnings(request, module);
+    warnings.extend(unsupported_claim_warnings.clone());
+    let source_ids = learning_source_ids_for_module(module);
+    let denial_tests_count = learning_denial_test_count(request, module);
 
     LearningEvalArtifact {
         artifact_version: "vibequest-learning-eval-v1".to_string(),
@@ -2600,19 +2933,29 @@ fn learning_eval_artifact(
         lesson_reports,
         warnings,
         integration_tags: learning_integration_tags(request),
+        source_categories: learning_source_categories_from_ids(&source_ids),
+        source_ids,
+        code_mode_enabled: wants_code_snippets_for_request(request),
+        final_lab_ready: learning_final_lab_ready(request, module),
+        denial_tests_count,
+        unsupported_claim_warnings,
         generated_at: Utc::now(),
     }
 }
 
 fn learning_lesson_eval_report(lesson: &LearningLesson) -> LearningLessonEvalReport {
     let validation = validation_state_from_lesson(lesson);
+    let source_urls = unique_learning_source_urls(lesson);
+    let source_ids = learning_source_ids_from_urls(&source_urls);
     LearningLessonEvalReport {
         lesson_id: lesson.id.clone(),
         title: lesson.title.clone(),
         validation,
         quality_score: lesson.quality_score.clone(),
         source_titles: unique_learning_source_titles(lesson),
-        source_urls: unique_learning_source_urls(lesson),
+        source_urls,
+        source_categories: learning_source_categories_from_ids(&source_ids),
+        source_ids,
         warning_count: learning_lesson_eval_warnings(lesson).len(),
     }
 }
@@ -6605,14 +6948,19 @@ fn default_learning_resources() -> Vec<LearningResource> {
             reason: "Reference Stacks, Clarity, transactions, wallets, sBTC, and Bitcoin-secured app development.".to_string(),
         },
         LearningResource {
+            title: "STON.fi DEX Overview".to_string(),
+            url: "https://docs.ston.fi/developer-section/dex/overview".to_string(),
+            reason: "Reference STON.fi DEX integration roles, swap flow, liquidity, pools, and routing context.".to_string(),
+        },
+        LearningResource {
             title: "STON.fi DEX SDK Documentation".to_string(),
             url: "https://docs.ston.fi/developer-section/dex/sdk".to_string(),
             reason: "Reference STON.fi swap quote, route, router, transaction, pool, and SDK integration behavior.".to_string(),
         },
         LearningResource {
-            title: "STON.fi Omniston Widget Documentation".to_string(),
-            url: "https://docs.ston.fi/developer-section/widget/widget".to_string(),
-            reason: "Reference Omniston widget loading, TON Connect manifest use, default assets, and integration UX.".to_string(),
+            title: "STON.fi DEX Smart Contracts".to_string(),
+            url: "https://docs.ston.fi/developer-section/dex/smart-contracts".to_string(),
+            reason: "Reference router, pool, LP account, vault, and contract-level integration boundaries.".to_string(),
         },
         LearningResource {
             title: "STON.fi REST API Documentation".to_string(),
@@ -6620,12 +6968,47 @@ fn default_learning_resources() -> Vec<LearningResource> {
             reason: "Reference pool, jetton, quote, and referral-fee data used by STON.fi integrations.".to_string(),
         },
         LearningResource {
+            title: "STON.fi Omniston Widget Overview".to_string(),
+            url: "https://docs.ston.fi/developer-section/widget".to_string(),
+            reason: "Reference the Omniston widget integration surface before selecting the full widget or SDK path.".to_string(),
+        },
+        LearningResource {
+            title: "STON.fi Omniston Widget Guide".to_string(),
+            url: "https://docs.ston.fi/developer-section/widget/widget".to_string(),
+            reason: "Reference Omniston widget loading, TON Connect manifest use, default assets, and integration UX.".to_string(),
+        },
+        LearningResource {
+            title: "STON.fi Omniston SDK".to_string(),
+            url: "https://docs.ston.fi/developer-section/omniston/sdk".to_string(),
+            reason: "Reference Omniston SDK integration when a builder needs deeper control than the widget.".to_string(),
+        },
+        LearningResource {
             title: "TON Connect Documentation".to_string(),
             url: "https://docs.ton.org/applications/ton-connect/overview".to_string(),
             reason: "Reference wallet connection, manifest boundaries, wallet approval, and app authorization on TON.".to_string(),
         },
         LearningResource {
-            title: "TON Jetton Documentation".to_string(),
+            title: "TON Connect UI Reference".to_string(),
+            url: "https://docs.ton.org/applications/ton-connect/api-reference/ui".to_string(),
+            reason: "Reference TON Connect UI behavior, connector reuse, wallet state, and transaction send boundaries.".to_string(),
+        },
+        LearningResource {
+            title: "TON Token Overview".to_string(),
+            url: "https://docs.ton.org/contracts/standard/tokens/overview".to_string(),
+            reason: "Reference TON token standards before reasoning about jetton assets in a swap UI.".to_string(),
+        },
+        LearningResource {
+            title: "TON Jetton Processing".to_string(),
+            url: "https://docs.ton.org/applications/payments/jettons".to_string(),
+            reason: "Reference practical jetton processing, deposits, withdrawals, and application payment handling.".to_string(),
+        },
+        LearningResource {
+            title: "TON Jetton Interface".to_string(),
+            url: "https://docs.ton.org/contracts/standard/tokens/jettons/api".to_string(),
+            reason: "Reference jetton interface methods and contract expectations for verification checks.".to_string(),
+        },
+        LearningResource {
+            title: "TON Jetton Architecture".to_string(),
             url: "https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works".to_string(),
             reason: "Reference jetton master contracts, wallet contracts, metadata risks, and token verification boundaries.".to_string(),
         },
@@ -6649,6 +7032,8 @@ fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
                 text.contains("ston.fi")
                     || text.contains("docs.ston")
                     || text.contains("ton connect")
+                    || text.contains("docs.ton")
+                    || text.contains("ton token")
                     || text.contains("jetton")
             })
             .collect();
@@ -6902,7 +7287,7 @@ fn normalize_ai_learning_lesson_for_request(
     );
 
     if learning_ecosystem_id(request) == "ton-stonfi" {
-        normalize_ton_stonfi_ai_learning_lesson(lesson_index, lesson);
+        normalize_ton_stonfi_ai_learning_lesson(request, lesson_index, lesson);
     }
 }
 
@@ -6923,6 +7308,7 @@ fn normalize_learning_side_field(value: &mut String, minimum_words: usize, addit
 }
 
 fn normalize_ton_stonfi_ai_learning_lesson(
+    request: &GenerateLearningModuleRequest,
     lesson_index: usize,
     lesson: &mut AiLearningLessonCompact,
 ) {
@@ -6944,6 +7330,62 @@ fn normalize_ton_stonfi_ai_learning_lesson(
         &learning_lesson_full_text(lesson).to_ascii_lowercase(),
     ) {
         append_learning_sentence(&mut lesson.e, ton_stonfi_role_sentence(lesson_index));
+    }
+
+    if wants_code_snippets_for_request(request) {
+        lesson.s = ton_stonfi_curated_code_lens(lesson_index).to_string();
+    }
+}
+
+fn ton_stonfi_curated_code_lens(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            r#"const manifestUrl = new URL('/tonconnect-manifest.json', window.location.origin).toString();
+export function canStartStonfiSwap(wallet) {
+  if (!wallet?.account?.address) return { ok: false, reason: 'wallet-disconnected' };
+  if (!manifestUrl.startsWith(window.location.origin)) return { ok: false, reason: 'manifest-domain-mismatch' };
+  return { ok: true, manifestUrl, walletAddress: wallet.account.address };
+}"#
+        }
+        1 => {
+            r#"export function validateStonfiQuote({ quote, selectedRoute, nowMs }) {
+  const maxAgeMs = 30_000;
+  if (!quote?.createdAtMs || nowMs - quote.createdAtMs > maxAgeMs) throw new Error('stale-quote');
+  if (quote.routeId !== selectedRoute.routeId) throw new Error('route-mismatch');
+  if (!quote.transactionPayload) throw new Error('missing-swap-transaction');
+  // Learner edit: lower maxAgeMs only if the UI refreshes quotes more often.
+  return { routeId: quote.routeId, transactionPayload: quote.transactionPayload };
+}"#
+        }
+        2 => {
+            r#"export function assertJettonAllowed({ jetton, allowlist }) {
+  const master = jetton?.masterAddress?.toLowerCase();
+  if (!master || !allowlist.has(master)) throw new Error('untrusted-jetton-master');
+  if (jetton.walletContract && !jetton.walletContract.startsWith('EQ')) throw new Error('invalid-jetton-wallet-contract');
+  if (jetton.symbolOnlyMatch) throw new Error('metadata-is-not-identity');
+  return master;
+}"#
+        }
+        3 => {
+            r#"export function enforceSwapIntent({ quote, minOut, slippageBps, referralFeeBps }) {
+  if (!Number.isFinite(minOut) || minOut <= 0) throw new Error('missing-min-out');
+  if (slippageBps > 100) throw new Error('slippage-too-wide');
+  if (referralFeeBps > 0 && !quote.referralDisclosureShown) throw new Error('fee-not-disclosed');
+  if (quote.expectedOut < minOut) throw new Error('min-out-violated');
+  return { minOut, slippageBps, referralFeeBps };
+}"#
+        }
+        _ => {
+            r#"export function finalStonfiLabChecks(state) {
+  const failures = [];
+  if (state.fakeJettonMaster) failures.push('fake-jetton-master');
+  if (state.staleQuote) failures.push('stale-quote');
+  if (state.pendingTreatedAsSuccess) failures.push('pending-not-success');
+  if (!state.referralFeeDisclosed) failures.push('fee-disclosure-missing');
+  if (state.restApiUsedAsSettlementProof) failures.push('rest-api-not-settlement-proof');
+  return { pass: failures.length === 0, failures };
+}"#
+        }
     }
 }
 
@@ -8433,7 +8875,7 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             learning_focus_label(request)
         ),
         "ton-stonfi" => format!(
-            "Generate a TON / STON.fi integration quest for {} with SDK or Omniston widget code, TON Connect wallet boundary, jetton verification, slippage/min-out checks, stale quote denial tests, and transaction-state evidence.",
+            "Generate a final TON / STON.fi safe-swap integration lab for {} with SDK or Omniston widget code, TON Connect wallet boundary, jetton master verification, slippage/min-out checks, referral-fee disclosure, transaction-state evidence, and at least eight denial tests covering fake jettons, stale quotes, missing min-out, wallet rejection, pending-as-success, wrong manifest domain, duplicate connector state, and REST API responses treated as settlement proof.",
             learning_focus_label(request)
         ),
         "basics" => format!(
@@ -8597,7 +9039,7 @@ fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) 
             "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
         }
         "ton-stonfi" => {
-            "Ground facts in official STON.fi and TON sources without quoting them: STON.fi DEX SDK https://docs.ston.fi/developer-section/dex/sdk, Omniston widget https://docs.ston.fi/developer-section/widget/widget, STON.fi REST API https://docs.ston.fi/developer-section/dex/api, TON Connect https://docs.ton.org/applications/ton-connect/overview, and TON Jettons https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works. Do not use CKB, Fiber, Zcash, or Stacks examples unless the learner explicitly asked to compare ecosystems."
+            "Ground facts in official STON.fi and TON sources without quoting them. Use at least two relevant source categories from this source pack when possible: STON.fi DEX overview https://docs.ston.fi/developer-section/dex/overview, DEX SDK https://docs.ston.fi/developer-section/dex/sdk, DEX smart contracts https://docs.ston.fi/developer-section/dex/smart-contracts, REST API https://docs.ston.fi/developer-section/dex/api, Omniston widget https://docs.ston.fi/developer-section/widget/widget, Omniston SDK https://docs.ston.fi/developer-section/omniston/sdk, TON Connect overview https://docs.ton.org/applications/ton-connect/overview, TON Connect UI reference https://docs.ton.org/applications/ton-connect/api-reference/ui, TON token overview https://docs.ton.org/contracts/standard/tokens/overview, TON jetton processing https://docs.ton.org/applications/payments/jettons, TON jetton interface https://docs.ton.org/contracts/standard/tokens/jettons/api, and TON jetton architecture https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works. Do not use CKB, Fiber, Zcash, or Stacks examples unless the learner explicitly asked to compare ecosystems."
         }
         "zcash" => {
             "Ground facts in official Zcash sources without quoting them: Zcash docs https://zcash.readthedocs.io/ and ZIP-321 https://zips.z.cash/zip-0321 for shielded payments, payment requests, privacy boundaries, memos, viewing keys, and confirmation safety."
@@ -8643,14 +9085,7 @@ fn learning_lesson_prompt(
     };
     let background = learning_background_label(request);
     let background = background.as_str();
-    let wants_code_snippets = request
-        .learning_intents
-        .iter()
-        .chain(request.interests.iter())
-        .any(|item| {
-            let lower = item.to_ascii_lowercase();
-            lower.contains("code snippet") || lower.contains("interactive code")
-        });
+    let wants_code_snippets = wants_code_snippets_for_request(request);
     let code_snippet_directive = if wants_code_snippets {
         "The learner selected interactive code samples. s must be a compact but real TypeScript or Rust snippet of 8-24 lines with comments and one safe learner edit point comment labeled \"Learner edit:\". Do not use TODO, placeholder, example.com, or filler wording. The snippet must be directly tied to the lesson."
     } else {
@@ -10149,7 +10584,8 @@ mod tests {
         assert_eq!(learning_ecosystem_label(&request), "TON / STON.fi");
         assert!(learning_focus_label(&request).contains("STON.fi SDK swap quote"));
         assert!(
-            learning_module_capstone_prompt(&request).contains("TON / STON.fi integration quest")
+            learning_module_capstone_prompt(&request)
+                .contains("final TON / STON.fi safe-swap integration lab")
         );
         assert!(learning_focus_directive(&request).contains("STON.fi DEX SDK"));
         assert!(learning_source_grounding_directive(&request).contains("docs.ston.fi"));
@@ -10159,10 +10595,21 @@ mod tests {
                 .iter()
                 .any(|concept| concept == "TON Connect")
         );
+        let ton_resources = default_learning_resources_for_focus("TON / STON.fi STON.fi SDK");
         assert!(
-            default_learning_resources_for_focus("TON / STON.fi STON.fi SDK")
+            ton_resources
                 .iter()
                 .any(|resource| resource.title == "STON.fi DEX SDK Documentation")
+        );
+        assert!(
+            ton_resources
+                .iter()
+                .any(|resource| resource.title == "STON.fi Omniston SDK")
+        );
+        assert!(
+            ton_resources
+                .iter()
+                .any(|resource| resource.title == "TON Jetton Processing")
         );
 
         let mut leaked = lesson.clone();
@@ -10210,6 +10657,150 @@ mod tests {
                 .integration_tags
                 .iter()
                 .any(|tag| tag == "quote-freshness")
+        );
+        assert!(artifact.code_mode_enabled);
+        assert!(!artifact.final_lab_ready);
+        assert!(artifact.denial_tests_count >= 5);
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "stonfi-dex-sdk")
+        );
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "ton-connect-overview")
+        );
+        assert!(
+            artifact
+                .source_categories
+                .iter()
+                .any(|category| category == "stonfi-sdk")
+        );
+        assert!(
+            artifact
+                .source_categories
+                .iter()
+                .any(|category| category == "jetton-standard")
+        );
+        assert!(
+            artifact.lesson_reports[0]
+                .source_categories
+                .iter()
+                .any(|category| category == "stonfi-sdk")
+        );
+    }
+
+    #[test]
+    fn ton_stonfi_eval_artifact_flags_final_lab_and_unsupported_claims() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("ton-stonfi-integration-lab".to_string()),
+            ecosystem_id: Some("ton-stonfi".to_string()),
+            topic: Some("Final STON.fi safe-swap integration lab".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Include code snippets".to_string()],
+            interests: vec![
+                "STON.fi SDK".to_string(),
+                "Omniston SDK".to_string(),
+                "TON Connect".to_string(),
+                "Jetton Verification".to_string(),
+            ],
+            learner_goal: "Build and review a safe TON / STON.fi swap learning lab".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let resources = default_learning_resources_for_focus("TON / STON.fi");
+        let final_lab_text = "Final STON.fi safe-swap lab: the learner builds one transaction review path and one denial-test matrix. The lab treats STON.fi quotes and Omniston widget output as integration inputs, not proof. It verifies TON Connect manifest domain, wallet approval scope, jetton master allowlist, jetton wallet contract assumptions, route identity, quote timestamp, slippage, min-out, referral fee disclosure, confirmed transaction state, and explorer-visible settlement. The denial cases mutate fake jetton metadata, fake token symbol, changed token pair, stale quote timestamp, wrong route, missing min-out, min-out set too low, wallet disconnected state, wallet rejection, pending transaction state, wrong TON Connect manifest domain, duplicate TON Connect connector state, referral fee disclosure, and REST API response treated as settlement proof. This also catches risky claims where a widget proves settlement or a REST API proves final transaction success.";
+        let lessons = (0..5)
+            .map(|index| LearningLesson {
+                id: format!("module-{}-lesson-1", index + 1),
+                title: if index == 4 {
+                    "Final STON.fi Safe-Swap Lab".to_string()
+                } else {
+                    format!("STON.fi Source-Grounded Boundary {}", index + 1)
+                },
+                why_it_matters: final_lab_text.to_string(),
+                explanation: final_lab_text.to_string(),
+                concepts: vec![
+                    "STON.fi SDK".to_string(),
+                    "TON Connect".to_string(),
+                    "jetton master".to_string(),
+                    "slippage".to_string(),
+                    "transaction state".to_string(),
+                ],
+                submodules: Vec::new(),
+                resources: resources.clone(),
+                evidence_map: Vec::new(),
+                quality_score: LearningQualityScore {
+                    source_coverage: 95,
+                    technical_depth: 95,
+                    checkpoint_quality: 95,
+                    placeholder_free: true,
+                    ecosystem_alignment: true,
+                    passed: true,
+                },
+                checkpoint: LearningCheckpoint {
+                    question: "Which evidence proves the STON.fi swap completed safely?".to_string(),
+                    options: vec![
+                        LearningOption {
+                            label: "Confirmed transaction state bound to checked route, jetton master, min-out, and disclosed fee".to_string(),
+                            feedback: "Correct boundary.".to_string(),
+                        },
+                        LearningOption {
+                            label: "The widget success label".to_string(),
+                            feedback: "Widget state is not settlement proof.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A REST quote response".to_string(),
+                            feedback: "A quote is not a confirmed transaction.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A token symbol".to_string(),
+                            feedback: "Symbols can be spoofed.".to_string(),
+                        },
+                    ],
+                    correct_index: 0,
+                    explanation: "The answer must bind user intent to verified route, jetton, min-out, fee, and final transaction evidence.".to_string(),
+                    follow_up_question: "Which denial case would you run first?".to_string(),
+                },
+                quest_bridge: final_lab_text.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons,
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources,
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+
+        let artifact = learning_eval_artifact(&request, &module, provider);
+
+        assert!(artifact.final_lab_ready);
+        assert!(artifact.denial_tests_count >= 8);
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("SDK/widget output"))
+        );
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("REST API response"))
         );
     }
 
