@@ -2842,23 +2842,33 @@ fn learning_final_lab_ready(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
 ) -> bool {
-    if learning_ecosystem_id(request) != "ton-stonfi" || module.lessons.len() < 5 {
+    if learning_ecosystem_id(request) != "ton-stonfi" {
         return false;
     }
-    let final_lesson = module.lessons.last().map(|lesson| {
-        format!(
-            "{} {} {} {}",
-            lesson.title, lesson.explanation, lesson.quest_bridge, lesson.checkpoint.question
-        )
-        .to_ascii_lowercase()
-    });
-    final_lesson.is_some_and(|text| {
-        (text.contains("final") || text.contains("lab") || text.contains("quest"))
-            && text.contains("ston.fi")
-            && text.contains("denial")
-            && text.contains("transaction")
-            && learning_denial_test_count(request, module) >= 8
-    })
+    let Some(final_lesson) = module.lessons.last() else {
+        return false;
+    };
+    let final_lesson_marker = module.lessons.len() >= 5
+        || final_lesson.id.starts_with("module-5-")
+        || final_lesson.title.to_ascii_lowercase().contains("final")
+        || final_lesson.title.to_ascii_lowercase().contains("lab");
+    if !final_lesson_marker {
+        return false;
+    }
+    let text = format!(
+        "{} {} {} {}",
+        final_lesson.title,
+        final_lesson.explanation,
+        final_lesson.quest_bridge,
+        final_lesson.checkpoint.question
+    )
+    .to_ascii_lowercase();
+
+    (text.contains("final") || text.contains("lab") || text.contains("quest"))
+        && text.contains("ston.fi")
+        && text.contains("denial")
+        && text.contains("transaction")
+        && learning_denial_test_count(request, module) >= 8
 }
 
 fn learning_integration_tags(request: &GenerateLearningModuleRequest) -> Vec<String> {
@@ -10802,6 +10812,27 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("REST API response"))
         );
+
+        let final_only_module = LearningModule {
+            title: module.title.clone(),
+            learner_profile: module.learner_profile.clone(),
+            outcome: module.outcome.clone(),
+            lessons: vec![module.lessons[4].clone()],
+            capstone_quest_prompt: module.capstone_quest_prompt.clone(),
+            resources: module.resources.clone(),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+        let final_only_artifact = learning_eval_artifact(&request, &final_only_module, provider);
+        assert!(final_only_artifact.final_lab_ready);
+        assert!(final_only_artifact.denial_tests_count >= 8);
     }
 
     #[test]
