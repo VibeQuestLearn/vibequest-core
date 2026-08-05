@@ -79,6 +79,8 @@ The TON / STON.fi track uses an expanded source pack covering STON.fi DEX overvi
 
 The Golem track uses a compute-specific source pack covering Golem docs, quickstarts, JS SDK, task model, requestor/provider interaction, Python, Ray, dApp deployment, provider docs, and Ray limitations. Validation treats Golem as decentralized compute infrastructure rather than a smart-contract chain, records execution path and compute-model coverage, expects requestor/provider/Yagna/task/result boundaries, and flags overclaims around provider output, cost, GPU/AI support, Ray support, and production certification.
 
+The Golem catalog entry also exposes grant-review proof metadata through `/v3/catalog`: a sample topic, five-module sample path, required evidence artifacts, demo steps, and source IDs. This makes the reviewer path inspectable without replacing the normal AI-generated course flow.
+
 ## Current Reviewed Track: Zcash Shielded Payments
 
 `src/zcash` is a network-free verifier boundary for the shielded-checkout track. It uses exact official crate versions to inspect Revision 0 Unified Addresses, enforce receiver and network policy, validate bounded ZIP-321 ZEC requests, classify Unified Viewing Keys, and evaluate reviewed payment lifecycle fixtures.

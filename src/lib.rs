@@ -9483,6 +9483,7 @@ fn clean_learning_module_title(raw: &str) -> String {
 
     let mut cleaned = title.to_string();
     for ecosystem in [
+        "Golem",
         "Stacks",
         "TON / STON.fi",
         "STON.fi",
@@ -9796,7 +9797,7 @@ fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) 
             "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
         }
         "golem" => {
-            "Ground facts in official Golem sources without quoting them. Use at least two relevant source categories from this source pack when possible: Golem docs https://docs.golem.network/, quickstarts https://docs.golem.network/docs/quickstarts, JS SDK https://docs.golem.network/docs/creators/javascript, JS task model https://docs.golem.network/docs/creators/javascript/guides/task-model, JS executing tasks https://docs.golem.network/docs/creators/javascript/examples/executing-tasks, requestor/provider interaction https://docs.golem.network/docs/creators/common/requestor-provider-interaction, Python quickstart https://docs.golem.network/docs/creators/python/quickstarts/run-first-task-on-golem, Python application fundamentals https://docs.golem.network/docs/creators/python/guides/application-fundamentals, Ray on Golem https://docs.golem.network/docs/creators/ray, Ray limitations https://docs.golem.network/docs/creators/ray/supported-versions-and-other-limitations, dApp deployment https://docs.golem.network/docs/creators/dapps/hello-world-dapp, creating dApps https://docs.golem.network/docs/creators/dapps/creating-golem-dapps, provider overview https://docs.golem.network/docs/providers, and provider architecture https://docs.golem.network/docs/golem/overview/provider. Do not use CKB, Fiber, Zcash, Stacks, TON, or STON.fi examples unless the learner explicitly asked to compare ecosystems. Do not claim Golem is a smart-contract chain or that VibeQuest certifies production deployments."
+            "Ground facts in official Golem sources without quoting them. Make the lesson feel like a practical decentralized-compute onboarding lab, not a docs summary and not a generic AI lesson. Use at least two relevant source categories from this source pack when possible: Golem docs https://docs.golem.network/, quickstarts https://docs.golem.network/docs/quickstarts, JS SDK https://docs.golem.network/docs/creators/javascript, JS task model https://docs.golem.network/docs/creators/javascript/guides/task-model, JS executing tasks https://docs.golem.network/docs/creators/javascript/examples/executing-tasks, requestor/provider interaction https://docs.golem.network/docs/creators/common/requestor-provider-interaction, Python quickstart https://docs.golem.network/docs/creators/python/quickstarts/run-first-task-on-golem, Python application fundamentals https://docs.golem.network/docs/creators/python/guides/application-fundamentals, Ray on Golem https://docs.golem.network/docs/creators/ray, Ray limitations https://docs.golem.network/docs/creators/ray/supported-versions-and-other-limitations, dApp deployment https://docs.golem.network/docs/creators/dapps/hello-world-dapp, creating dApps https://docs.golem.network/docs/creators/dapps/creating-golem-dapps, provider overview https://docs.golem.network/docs/providers, and provider architecture https://docs.golem.network/docs/golem/overview/provider. Do not use CKB, Fiber, Zcash, Stacks, TON, or STON.fi examples unless the learner explicitly asked to compare ecosystems. Do not claim Golem is a smart-contract chain or that VibeQuest certifies production deployments. Every Golem module must identify what runs locally, what Yagna coordinates, what a provider executes, what output must be validated, and what failure would stop the learner from trusting the job."
         }
         "ton-stonfi" => {
             "Ground facts in official STON.fi and TON sources without quoting them. Use at least two relevant source categories from this source pack when possible: STON.fi DEX overview https://docs.ston.fi/developer-section/dex/overview, DEX SDK https://docs.ston.fi/developer-section/dex/sdk, DEX smart contracts https://docs.ston.fi/developer-section/dex/smart-contracts, REST API https://docs.ston.fi/developer-section/dex/api, Omniston widget https://docs.ston.fi/developer-section/widget/widget, Omniston SDK https://docs.ston.fi/developer-section/omniston/sdk, TON Connect overview https://docs.ton.org/applications/ton-connect/overview, TON Connect UI reference https://docs.ton.org/applications/ton-connect/api-reference/ui, TON token overview https://docs.ton.org/contracts/standard/tokens/overview, TON jetton processing https://docs.ton.org/applications/payments/jettons, TON jetton interface https://docs.ton.org/contracts/standard/tokens/jettons/api, and TON jetton architecture https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works. Do not use CKB, Fiber, Zcash, or Stacks examples unless the learner explicitly asked to compare ecosystems."
@@ -11135,6 +11136,12 @@ mod tests {
                 "VibeQuest: Stacks: Stacks and Bitcoin mental model Deep Dive"
             ),
             "Stacks and Bitcoin mental model Deep Dive"
+        );
+        assert_eq!(
+            clean_learning_module_title(
+                "VibeQuest: Golem: Golem compute lab: requestor/provider execution Deep Dive"
+            ),
+            "Golem compute lab: requestor/provider execution Deep Dive"
         );
     }
 
