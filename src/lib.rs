@@ -441,6 +441,16 @@ struct LearningEvalArtifact {
     denial_tests_count: usize,
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     unsupported_claim_warnings: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    compute_model_coverage: Vec<String>,
+    #[serde(default)]
+    execution_path: Option<String>,
+    #[serde(default)]
+    task_lifecycle_covered: bool,
+    #[serde(default)]
+    failure_cases_count: usize,
+    #[serde(default)]
+    final_compute_lab_ready: bool,
     generated_at: DateTime<Utc>,
 }
 
@@ -2528,6 +2538,11 @@ fn compact_learning_eval_artifact(
             16,
             220,
         ),
+        compute_model_coverage: compact_string_list(artifact.compute_model_coverage, 12, 80),
+        execution_path: artifact.execution_path.map(|path| clamp_text(path, 80)),
+        task_lifecycle_covered: artifact.task_lifecycle_covered,
+        failure_cases_count: artifact.failure_cases_count.min(99),
+        final_compute_lab_ready: artifact.final_compute_lab_ready,
         generated_at: artifact.generated_at,
     }
 }
@@ -2603,7 +2618,48 @@ fn learning_source_ids_from_urls(urls: &[String]) -> Vec<String> {
 
 fn learning_source_id_for_url(url: &str) -> Option<&'static str> {
     let lower = url.to_ascii_lowercase();
-    if lower.contains("docs.ston.fi/developer-section/dex/overview") {
+    if lower == "https://golem.network/ecosystem" || lower.contains("golem.network/ecosystem") {
+        Some("golem-ecosystem-fund")
+    } else if lower == "https://docs.golem.network/" || lower == "https://docs.golem.network" {
+        Some("golem-docs")
+    } else if lower.contains("docs.golem.network/docs/quickstarts") {
+        Some("golem-quickstarts")
+    } else if lower.contains("docs.golem.network/docs/creators/javascript/quickstarts/quickstart") {
+        Some("golem-js-quickstart")
+    } else if lower.contains("docs.golem.network/docs/creators/javascript/guides/task-model") {
+        Some("golem-js-task-model")
+    } else if lower.contains("docs.golem.network/docs/creators/javascript/examples/executing-tasks")
+    {
+        Some("golem-js-executing-tasks")
+    } else if lower.contains("docs.golem.network/docs/creators/javascript") {
+        Some("golem-js-sdk")
+    } else if lower
+        .contains("docs.golem.network/docs/creators/common/requestor-provider-interaction")
+    {
+        Some("golem-requestor-provider")
+    } else if lower
+        .contains("docs.golem.network/docs/creators/python/quickstarts/run-first-task-on-golem")
+    {
+        Some("golem-python-quickstart")
+    } else if lower
+        .contains("docs.golem.network/docs/creators/python/guides/application-fundamentals")
+    {
+        Some("golem-python-fundamentals")
+    } else if lower
+        .contains("docs.golem.network/docs/creators/ray/supported-versions-and-other-limitations")
+    {
+        Some("golem-ray-limitations")
+    } else if lower.contains("docs.golem.network/docs/creators/ray") {
+        Some("golem-ray")
+    } else if lower.contains("docs.golem.network/docs/creators/dapps/hello-world-dapp") {
+        Some("golem-dapp-hello-world")
+    } else if lower.contains("docs.golem.network/docs/creators/dapps/creating-golem-dapps") {
+        Some("golem-dapp-creation")
+    } else if lower.contains("docs.golem.network/docs/providers") {
+        Some("golem-provider-overview")
+    } else if lower.contains("docs.golem.network/docs/golem/overview/provider") {
+        Some("golem-provider-architecture")
+    } else if lower.contains("docs.ston.fi/developer-section/dex/overview") {
         Some("stonfi-dex-overview")
     } else if lower.contains("docs.ston.fi/developer-section/dex/sdk") {
         Some("stonfi-dex-sdk")
@@ -2660,6 +2716,17 @@ fn learning_source_categories_from_ids(ids: &[String]) -> Vec<String> {
 
 fn learning_source_category_for_id(id: &str) -> &'static str {
     match id {
+        "golem-ecosystem-fund" => "golem-ecosystem",
+        "golem-docs" | "golem-quickstarts" => "golem-foundations",
+        "golem-js-sdk"
+        | "golem-js-quickstart"
+        | "golem-js-task-model"
+        | "golem-js-executing-tasks" => "golem-js-sdk",
+        "golem-requestor-provider" => "golem-requestor-provider",
+        "golem-python-quickstart" | "golem-python-fundamentals" => "golem-python",
+        "golem-ray" | "golem-ray-limitations" => "golem-ray",
+        "golem-dapp-hello-world" | "golem-dapp-creation" => "golem-dapp",
+        "golem-provider-overview" | "golem-provider-architecture" => "golem-provider",
         "stonfi-dex-overview" | "stonfi-dex-smart-contracts" => "stonfi-dex",
         "stonfi-dex-sdk" => "stonfi-sdk",
         "stonfi-dex-rest-api" => "rest-api",
@@ -2683,7 +2750,11 @@ fn learning_unsupported_claim_warnings(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
 ) -> Vec<String> {
-    if learning_ecosystem_id(request) != "ton-stonfi" {
+    let ecosystem_id = learning_ecosystem_id(request);
+    if ecosystem_id == "golem" {
+        return golem_unsupported_claim_warnings(module);
+    }
+    if ecosystem_id != "ton-stonfi" {
         return Vec::new();
     }
     let combined = learning_module_full_text(module).to_ascii_lowercase();
@@ -2762,6 +2833,75 @@ fn learning_unsupported_claim_warnings(
     warnings
 }
 
+fn golem_unsupported_claim_warnings(module: &LearningModule) -> Vec<String> {
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let mut warnings = Vec::new();
+
+    if risky_phrase_present(
+        &combined,
+        &[
+            "smart contract executes compute",
+            "on-chain compute executes",
+            "blockchain executes the workload",
+        ],
+    ) {
+        warnings.push("Golem workload execution is being described like smart-contract execution; keep requestor/provider/Yagna boundaries explicit.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "provider result proves correctness",
+            "provider output is automatically trusted",
+            "provider output proves correctness",
+            "result is automatically trusted",
+        ],
+    ) {
+        warnings.push("Provider output is being treated as automatically correct; require result validation, retries, or verification strategy.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "free compute",
+            "zero-cost compute",
+            "unlimited compute",
+            "guaranteed cheapest compute",
+        ],
+    ) {
+        warnings.push("Cost or availability is overclaimed; require budget, agreement, provider, and workload constraints.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "guaranteed gpu",
+            "unlimited gpu",
+            "production gpu inference",
+            "any ai workload",
+        ],
+    ) {
+        warnings.push("AI/GPU capability is overclaimed; ground workload support in official Golem docs and current limitations.".to_string());
+    }
+    if combined.contains("ray")
+        && !combined.contains("limitation")
+        && !combined.contains("supported version")
+    {
+        warnings.push(
+            "Ray is mentioned without limitations or supported-version constraints.".to_string(),
+        );
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "production certified",
+            "production-ready certification",
+            "certifies production",
+        ],
+    ) {
+        warnings.push("The lesson implies production certification; VibeQuest can teach and validate learning artifacts, not certify deployments.".to_string());
+    }
+
+    warnings
+}
+
 fn risky_phrase_present(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(*phrase))
 }
@@ -2792,7 +2932,11 @@ fn learning_denial_test_count(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
 ) -> usize {
-    if learning_ecosystem_id(request) != "ton-stonfi" {
+    let ecosystem_id = learning_ecosystem_id(request);
+    if ecosystem_id == "golem" {
+        return golem_failure_case_count(module);
+    }
+    if ecosystem_id != "ton-stonfi" {
         return module
             .lessons
             .iter()
@@ -2842,6 +2986,9 @@ fn learning_final_lab_ready(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
 ) -> bool {
+    if learning_ecosystem_id(request) == "golem" {
+        return golem_final_compute_lab_ready(request, module);
+    }
     if learning_ecosystem_id(request) != "ton-stonfi" {
         return false;
     }
@@ -2873,6 +3020,17 @@ fn learning_final_lab_ready(
 
 fn learning_integration_tags(request: &GenerateLearningModuleRequest) -> Vec<String> {
     match learning_ecosystem_id(request).as_str() {
+        "golem" => vec![
+            "decentralized-compute".to_string(),
+            "requestor-provider".to_string(),
+            "yagna".to_string(),
+            "js-sdk".to_string(),
+            "python-sdk".to_string(),
+            "ray-on-golem".to_string(),
+            "dapp-deployment".to_string(),
+            "task-lifecycle".to_string(),
+            "failure-state".to_string(),
+        ],
         "ton-stonfi" => vec![
             "sdk".to_string(),
             "widget".to_string(),
@@ -2928,6 +3086,11 @@ fn learning_eval_artifact(
     warnings.extend(unsupported_claim_warnings.clone());
     let source_ids = learning_source_ids_for_module(module);
     let denial_tests_count = learning_denial_test_count(request, module);
+    let compute_model_coverage = golem_compute_model_coverage(request, module);
+    let execution_path = golem_execution_path(request, module);
+    let task_lifecycle_covered = golem_task_lifecycle_covered(request, module);
+    let failure_cases_count = golem_failure_case_count_for_request(request, module);
+    let final_compute_lab_ready = golem_final_compute_lab_ready(request, module);
 
     LearningEvalArtifact {
         artifact_version: "vibequest-learning-eval-v1".to_string(),
@@ -2949,6 +3112,11 @@ fn learning_eval_artifact(
         final_lab_ready: learning_final_lab_ready(request, module),
         denial_tests_count,
         unsupported_claim_warnings,
+        compute_model_coverage,
+        execution_path,
+        task_lifecycle_covered,
+        failure_cases_count,
+        final_compute_lab_ready,
         generated_at: Utc::now(),
     }
 }
@@ -3056,6 +3224,7 @@ fn learning_eval_warnings(
     }
 
     warnings.extend(ton_stonfi_module_warnings(module));
+    warnings.extend(golem_module_warnings(module));
 
     warnings
 }
@@ -3121,6 +3290,245 @@ fn ton_stonfi_module_warnings(module: &LearningModule) -> Vec<String> {
         .into_iter()
         .filter_map(|(warning, passed)| (!passed).then(|| warning.to_string()))
         .collect()
+}
+
+fn golem_module_warnings(module: &LearningModule) -> Vec<String> {
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let looks_golem = [
+        "golem",
+        "yagna",
+        "requestor",
+        "provider",
+        "ray",
+        "golem sdk",
+        "decentralized compute",
+    ]
+    .iter()
+    .any(|term| combined.contains(term));
+    if !looks_golem {
+        return Vec::new();
+    }
+
+    let checks = [
+        (
+            "requestor/provider boundary is not explicit",
+            combined.contains("requestor") && combined.contains("provider"),
+        ),
+        (
+            "Yagna or app-key coordination is not explicit",
+            combined.contains("yagna") || combined.contains("app key"),
+        ),
+        (
+            "task lifecycle is not explicit",
+            combined.contains("task")
+                && (combined.contains("result") || combined.contains("output"))
+                && (combined.contains("agreement")
+                    || combined.contains("allocation")
+                    || combined.contains("market")),
+        ),
+        (
+            "provider failure handling is not explicit",
+            combined.contains("failure")
+                || combined.contains("timeout")
+                || combined.contains("retry")
+                || combined.contains("provider unavailable"),
+        ),
+        (
+            "cost or payment boundary is not explicit",
+            combined.contains("cost")
+                || combined.contains("budget")
+                || combined.contains("payment")
+                || combined.contains("price"),
+        ),
+    ];
+
+    checks
+        .into_iter()
+        .filter_map(|(warning, passed)| (!passed).then(|| warning.to_string()))
+        .collect()
+}
+
+fn golem_compute_model_coverage(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> Vec<String> {
+    if learning_ecosystem_id(request) != "golem" {
+        return Vec::new();
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let mut coverage = Vec::new();
+    for (needle, label) in [
+        ("requestor", "requestor"),
+        ("provider", "provider"),
+        ("yagna", "yagna"),
+        ("app key", "app-key"),
+        ("agreement", "agreement"),
+        ("allocation", "allocation"),
+        ("task", "task"),
+        ("result", "result-handling"),
+        ("output", "result-handling"),
+        ("payment", "payment"),
+        ("budget", "budget"),
+        ("ray", "ray"),
+        ("dapp", "dapp"),
+        ("gvmi", "gvmi"),
+        ("provider failure", "provider-failure"),
+        ("timeout", "timeout"),
+        ("retry", "retry"),
+    ] {
+        if combined.contains(needle) && !coverage.iter().any(|item| item == label) {
+            coverage.push(label.to_string());
+        }
+    }
+    coverage
+}
+
+fn golem_execution_path(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> Option<String> {
+    if learning_ecosystem_id(request) != "golem" {
+        return None;
+    }
+    let request_hint = format!(
+        "{} {} {}",
+        learning_focus_label(request),
+        request.interests.join(" "),
+        request.learner_goal
+    )
+    .to_ascii_lowercase();
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let path = if request_hint.contains("javascript")
+        || request_hint.contains("js sdk")
+        || request_hint.contains("golem js")
+    {
+        "js-sdk-task-execution"
+    } else if request_hint.contains("dapp")
+        || request_hint.contains("gvmi")
+        || request_hint.contains("descriptor")
+    {
+        "golem-dapp-deployment"
+    } else if request_hint.contains("ray") {
+        "ray-on-golem"
+    } else if request_hint.contains("python") {
+        "python-sdk-task-execution"
+    } else if combined.contains("dapp")
+        || combined.contains("gvmi")
+        || combined.contains("descriptor")
+    {
+        "golem-dapp-deployment"
+    } else if combined.contains("javascript")
+        || combined.contains("js sdk")
+        || combined.contains("@golem-sdk")
+    {
+        "js-sdk-task-execution"
+    } else if combined.contains("python") {
+        "python-sdk-task-execution"
+    } else if combined.contains("ray") {
+        "ray-on-golem"
+    } else {
+        "requestor-provider-task-execution"
+    };
+    Some(path.to_string())
+}
+
+fn golem_task_lifecycle_covered(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "golem" {
+        return false;
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let lifecycle_terms = [
+        "requestor",
+        "provider",
+        "yagna",
+        "agreement",
+        "allocation",
+        "task",
+        "result",
+        "payment",
+    ];
+    count_terms(&combined, &lifecycle_terms) >= 5
+}
+
+fn golem_failure_case_count_for_request(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> usize {
+    if learning_ecosystem_id(request) == "golem" {
+        golem_failure_case_count(module)
+    } else {
+        0
+    }
+}
+
+fn golem_failure_case_count(module: &LearningModule) -> usize {
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let failure_cases = [
+        ["provider unavailable", "no provider", "provider offline"].as_slice(),
+        ["provider timeout", "task timeout", "timeout"].as_slice(),
+        ["failed task", "task failed", "execution failure"].as_slice(),
+        ["missing result", "empty result", "no output"].as_slice(),
+        ["corrupted result", "wrong result", "invalid result"].as_slice(),
+        ["wrong image", "wrong gvmi", "image mismatch"].as_slice(),
+        ["wrong runtime", "unsupported version", "version mismatch"].as_slice(),
+        ["budget exceeded", "price too high", "payment failure"].as_slice(),
+        [
+            "agreement rejected",
+            "agreement mismatch",
+            "market mismatch",
+        ]
+        .as_slice(),
+        ["yagna disconnected", "lost yagna", "yagna failure"].as_slice(),
+        ["network failure", "network partition", "connection failure"].as_slice(),
+        ["ray limitation", "ray unsupported", "ray supported version"].as_slice(),
+        [
+            "provider result automatically trusted",
+            "unverified provider output",
+        ]
+        .as_slice(),
+    ];
+    failure_cases
+        .iter()
+        .filter(|terms| terms.iter().any(|term| combined.contains(*term)))
+        .count()
+}
+
+fn golem_final_compute_lab_ready(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "golem" {
+        return false;
+    }
+    let Some(final_lesson) = module.lessons.last() else {
+        return false;
+    };
+    let final_title = final_lesson.title.to_ascii_lowercase();
+    let final_lesson_marker = module.lessons.len() >= 5
+        || final_lesson.id.starts_with("module-5-")
+        || final_title.contains("final");
+    if !final_lesson_marker {
+        return false;
+    }
+    let text = format!(
+        "{} {} {} {}",
+        final_lesson.title,
+        final_lesson.explanation,
+        final_lesson.quest_bridge,
+        final_lesson.checkpoint.question
+    )
+    .to_ascii_lowercase();
+
+    text.contains("final")
+        && text.contains("golem")
+        && text.contains("requestor")
+        && text.contains("provider")
+        && text.contains("task")
+        && (text.contains("result") || text.contains("output"))
+        && golem_failure_case_count(module) >= 6
 }
 
 fn learning_lesson_eval_warnings(lesson: &LearningLesson) -> Vec<String> {
@@ -6958,6 +7366,81 @@ fn default_learning_resources() -> Vec<LearningResource> {
             reason: "Reference Stacks, Clarity, transactions, wallets, sBTC, and Bitcoin-secured app development.".to_string(),
         },
         LearningResource {
+            title: "Golem Ecosystem Fund".to_string(),
+            url: "https://golem.network/ecosystem".to_string(),
+            reason: "Reference Golem ecosystem goals, fund fit, builder value, and decentralized compute growth priorities.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Docs".to_string(),
+            url: "https://docs.golem.network/".to_string(),
+            reason: "Reference Golem requestor/provider concepts, Yagna, SDKs, dApps, and decentralized compute workflows.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Quickstarts".to_string(),
+            url: "https://docs.golem.network/docs/quickstarts".to_string(),
+            reason: "Reference first-task paths for learners moving from concept to practical execution.".to_string(),
+        },
+        LearningResource {
+            title: "Golem JS SDK".to_string(),
+            url: "https://docs.golem.network/docs/creators/javascript".to_string(),
+            reason: "Reference JavaScript SDK requestor workflow, task execution, package structure, and app integration.".to_string(),
+        },
+        LearningResource {
+            title: "Golem JS Task Model".to_string(),
+            url: "https://docs.golem.network/docs/creators/javascript/guides/task-model".to_string(),
+            reason: "Reference task lifecycle, work definition, provider execution, result collection, and cleanup boundaries.".to_string(),
+        },
+        LearningResource {
+            title: "Golem JS Executing Tasks".to_string(),
+            url: "https://docs.golem.network/docs/creators/javascript/examples/executing-tasks".to_string(),
+            reason: "Reference practical task execution examples and result-handling patterns.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Requestor / Provider Interaction".to_string(),
+            url: "https://docs.golem.network/docs/creators/common/requestor-provider-interaction".to_string(),
+            reason: "Reference agreements, requestor/provider separation, market negotiation, and compute execution boundaries.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Python Quickstart".to_string(),
+            url: "https://docs.golem.network/docs/creators/python/quickstarts/run-first-task-on-golem".to_string(),
+            reason: "Reference Python task execution flow for builders learning non-JavaScript workloads.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Python Application Fundamentals".to_string(),
+            url: "https://docs.golem.network/docs/creators/python/guides/application-fundamentals".to_string(),
+            reason: "Reference Python app structure, executor behavior, task payloads, and result collection.".to_string(),
+        },
+        LearningResource {
+            title: "Ray on Golem".to_string(),
+            url: "https://docs.golem.network/docs/creators/ray".to_string(),
+            reason: "Reference distributed Python and Ray workload patterns on Golem.".to_string(),
+        },
+        LearningResource {
+            title: "Ray on Golem Limitations".to_string(),
+            url: "https://docs.golem.network/docs/creators/ray/supported-versions-and-other-limitations".to_string(),
+            reason: "Reference practical limits so generated lessons do not overclaim Ray or AI workload readiness.".to_string(),
+        },
+        LearningResource {
+            title: "Golem dApp Hello World".to_string(),
+            url: "https://docs.golem.network/docs/creators/dapps/hello-world-dapp".to_string(),
+            reason: "Reference the simplest deployable Golem dApp flow and service lifecycle.".to_string(),
+        },
+        LearningResource {
+            title: "Creating Golem dApps".to_string(),
+            url: "https://docs.golem.network/docs/creators/dapps/creating-golem-dapps".to_string(),
+            reason: "Reference descriptors, images, services, manifests, and dApp deployment structure.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Provider Overview".to_string(),
+            url: "https://docs.golem.network/docs/providers".to_string(),
+            reason: "Reference provider onboarding, compute contribution, node operation, and provider-side assumptions.".to_string(),
+        },
+        LearningResource {
+            title: "Golem Provider Architecture".to_string(),
+            url: "https://docs.golem.network/docs/golem/overview/provider".to_string(),
+            reason: "Reference provider architecture when explaining boundaries between requestor code and provider execution.".to_string(),
+        },
+        LearningResource {
             title: "STON.fi DEX Overview".to_string(),
             url: "https://docs.ston.fi/developer-section/dex/overview".to_string(),
             reason: "Reference STON.fi DEX integration roles, swap flow, liquidity, pools, and routing context.".to_string(),
@@ -7028,6 +7511,28 @@ fn default_learning_resources() -> Vec<LearningResource> {
 fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
     let lower = focus.to_ascii_lowercase();
     let all = default_learning_resources();
+    if lower.contains("golem")
+        || lower.contains("yagna")
+        || lower.contains("requestor")
+        || lower.contains("provider")
+        || lower.contains("ray on golem")
+        || lower.contains("decentralized compute")
+    {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("golem.network")
+                    || text.contains("golem docs")
+                    || text.contains("golem js")
+                    || text.contains("golem python")
+                    || text.contains("ray on golem")
+                    || text.contains("requestor")
+                    || text.contains("provider")
+                    || text.contains("dapp")
+            })
+            .collect();
+    }
     if lower.contains("ston")
         || lower.contains("omniston")
         || lower.contains("ton connect")
@@ -7299,6 +7804,9 @@ fn normalize_ai_learning_lesson_for_request(
     if learning_ecosystem_id(request) == "ton-stonfi" {
         normalize_ton_stonfi_ai_learning_lesson(request, lesson_index, lesson);
     }
+    if learning_ecosystem_id(request) == "golem" {
+        normalize_golem_ai_learning_lesson(request, lesson_index, lesson);
+    }
 }
 
 fn normalize_code_lens_edit_markers(value: &str) -> String {
@@ -7435,6 +7943,123 @@ fn ton_stonfi_role_sentence(lesson_index: usize) -> &'static str {
         }
         _ => {
             "Module focus: the final quest ties TON Connect, STON.fi route evidence, transaction state, and denial tests into one reviewable artifact."
+        }
+    }
+}
+
+fn normalize_golem_ai_learning_lesson(
+    request: &GenerateLearningModuleRequest,
+    lesson_index: usize,
+    lesson: &mut AiLearningLessonCompact,
+) {
+    let source_sentence = "Accuracy check: verify the Golem compute workflow against official Golem docs at docs.golem.network, including requestor/provider interaction, JS SDK, Python/Ray, dApp deployment, provider docs, and documented Ray limitations before trusting generated compute code.";
+    if !lesson_has_official_source_anchor("golem", &learning_lesson_full_text(lesson)) {
+        append_learning_sentence(&mut lesson.e, source_sentence);
+    }
+
+    if !lesson_has_accuracy_nuance(&learning_lesson_full_text(lesson)) {
+        append_learning_sentence(
+            &mut lesson.e,
+            "Failure-case test: reject provider unavailable states, task timeout, missing result, corrupted result, wrong GVMI image or runtime, agreement mismatch, budget exceeded, Yagna disconnect, and Ray limitation assumptions instead of treating provider output as automatically correct.",
+        );
+    }
+
+    if !lesson_mentions_role_specific_terms(
+        "golem",
+        lesson_index,
+        &learning_lesson_full_text(lesson).to_ascii_lowercase(),
+    ) {
+        append_learning_sentence(&mut lesson.e, golem_role_sentence(lesson_index));
+    }
+
+    if lesson_index >= 4 {
+        append_learning_sentence(&mut lesson.e, golem_final_lab_failure_checklist());
+        append_learning_sentence(
+            &mut lesson.j,
+            "Final compute lab artifact: a Golem execution plan plus failure matrix covering requestor/provider boundaries, Yagna setup, agreement and budget checks, task execution, result validation, provider failure, timeout, wrong image, unsupported Ray path, and cleanup.",
+        );
+    }
+
+    if wants_code_snippets_for_request(request) {
+        lesson.s = golem_curated_code_lens(lesson_index).to_string();
+    }
+}
+
+fn golem_final_lab_failure_checklist() -> &'static str {
+    "Final Golem compute lab failure checklist: provider unavailable, provider timeout, failed task execution, missing result, corrupted result, wrong GVMI image, wrong runtime version, agreement mismatch, budget exceeded, Yagna disconnected, network failure, Ray unsupported-version limitation, and provider output treated as automatically trusted."
+}
+
+fn golem_curated_code_lens(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            r#"export function describeGolemBoundary({ requestor, provider, yagna }) {
+  if (!requestor?.appKey) throw new Error('missing-requestor-app-key');
+  if (!yagna?.running) throw new Error('yagna-not-running');
+  // Learner edit: add the provider capabilities this workload actually needs.
+  return { requestorId: requestor.id, providerPool: provider?.market ?? 'open-market' };
+}"#
+        }
+        1 => {
+            r#"export function validateGolemTaskResult({ task, result, provider }) {
+  if (!task?.command) throw new Error('missing-task-command');
+  if (!provider?.id) throw new Error('missing-provider');
+  if (!result?.stdout && !result?.artifactUrl) throw new Error('missing-result');
+  // Learner edit: add a checksum or semantic validator for the expected output.
+  return { taskId: task.id, providerId: provider.id, outputReady: true };
+}"#
+        }
+        2 => {
+            r#"export function chooseGolemPythonPath({ workload, ray }) {
+  if (workload.requiresSharedGpu) throw new Error('unsupported-capability-claim');
+  if (ray?.enabled && !ray.supportedVersion) throw new Error('ray-version-not-supported');
+  // Learner edit: split the workload only when tasks can be independently verified.
+  return ray?.enabled ? 'ray-on-golem' : 'python-sdk-task-execution';
+}"#
+        }
+        3 => {
+            r#"export function validateGolemDappManifest({ descriptor, image, service }) {
+  if (!descriptor?.services?.length) throw new Error('missing-dapp-services');
+  if (!image?.gvmiHash) throw new Error('missing-gvmi-image');
+  if (!service?.healthcheck) throw new Error('missing-service-healthcheck');
+  // Learner edit: bind exposed ports and proxy assumptions to the actual service.
+  return { serviceCount: descriptor.services.length, gvmiHash: image.gvmiHash };
+}"#
+        }
+        _ => {
+            r#"export function finalGolemComputeQuestChecks(state) {
+  const failures = [];
+  if (!state.requestorAppKey) failures.push('missing-requestor-app-key');
+  if (!state.yagnaRunning) failures.push('yagna-disconnected');
+  if (!state.providerSelected) failures.push('provider-unavailable');
+  if (state.agreementMismatch) failures.push('agreement-mismatch');
+  if (state.budgetExceeded) failures.push('budget-exceeded');
+  if (state.taskTimeout) failures.push('task-timeout');
+  if (state.wrongGvmiImage) failures.push('wrong-gvmi-image');
+  if (state.unsupportedRayVersion) failures.push('ray-limitation');
+  if (!state.resultValidated) failures.push('unverified-provider-output');
+  // Learner edit: add one workload-specific semantic result check.
+  return { pass: failures.length === 0, failures };
+}"#
+        }
+    }
+}
+
+fn golem_role_sentence(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            "Module focus: a safe Golem learner separates requestor intent, Yagna coordination, provider execution, agreement/payment boundaries, and result validation before trusting a decentralized compute job."
+        }
+        1 => {
+            "Module focus: the JS SDK path must define the task, select provider capacity, execute the workload, collect outputs, validate results, and clean up the Golem allocation."
+        }
+        2 => {
+            "Module focus: Python and Ray workloads need explicit supported-version checks, split-workload reasoning, result verification, and fallback behavior when Ray is not the right execution path."
+        }
+        3 => {
+            "Module focus: Golem dApp deployment ties descriptor, GVMI image, service lifecycle, logs, proxies, and health checks into one reviewable compute service."
+        }
+        _ => {
+            "Module focus: the final Golem quest proves requestor/provider boundaries, Yagna setup, agreement and budget checks, task lifecycle, result validation, and failure-state denial tests."
         }
     }
 }
@@ -7717,6 +8342,19 @@ fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static
             "sbtc documentation",
             "bns documentation",
         ],
+        "golem" => &[
+            "official golem",
+            "golem docs",
+            "docs.golem.network",
+            "golem documentation",
+            "golem js sdk",
+            "js sdk",
+            "golem python",
+            "ray on golem",
+            "golem dapp",
+            "requestor/provider",
+            "provider overview",
+        ],
         "ton-stonfi" => &[
             "official ston.fi",
             "ston.fi documentation",
@@ -7778,6 +8416,11 @@ fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static
             "docs.ston.fi",
             "ton connect documentation",
             "docs.ton.org",
+            "golem docs",
+            "official golem",
+            "docs.golem.network",
+            "golem js sdk",
+            "ray on golem",
             "ethereum developer docs",
             "mdn web docs",
             "source pack",
@@ -7925,6 +8568,17 @@ fn role_specific_terms(ecosystem_id: &str, lesson_index: usize) -> &'static [&'s
             "transaction state",
             "ston.fi",
         ],
+        ("golem", 0) => &["requestor", "provider", "yagna", "agreement", "payment"],
+        ("golem", 1) => &["js sdk", "javascript", "task", "result", "cleanup"],
+        ("golem", 2) => &[
+            "python",
+            "ray",
+            "supported version",
+            "limitation",
+            "workload",
+        ],
+        ("golem", 3) => &["dapp", "gvmi", "descriptor", "service", "lifecycle"],
+        ("golem", 4) => &["quest", "requestor", "provider", "failure", "result"],
         ("ckb", 0) => &["cell", "live cell", "capacity", "state"],
         ("ckb", 1) => &["outpoint", "input", "output", "transaction"],
         ("ckb", 2) => &["script", "witness", "lock", "type"],
@@ -8111,6 +8765,17 @@ fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> b
             "proof of transfer",
             "bitcoin",
         ],
+        "golem" => &[
+            "golem",
+            "yagna",
+            "requestor",
+            "provider",
+            "task",
+            "agreement",
+            "allocation",
+            "result",
+            "decentralized compute",
+        ],
         "ton-stonfi" => &[
             "ston.fi",
             "stonfi",
@@ -8181,6 +8846,23 @@ fn contains_unrequested_ecosystem_leakage(
             "zip-321",
             "zatoshi",
             "orchard receiver",
+        ],
+        "golem" => &[
+            "joyid",
+            "xudt",
+            "fiber invoice",
+            "ckb cell",
+            "outpoint lineage",
+            "zip-321",
+            "zatoshi",
+            "orchard receiver",
+            "clarity contract",
+            "sbtc",
+            "bns",
+            "ston.fi",
+            "omniston",
+            "ton connect",
+            "jetton",
         ],
         "ton-stonfi" => &[
             "joyid",
@@ -8659,6 +9341,21 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
         ("post-condition", "post-condition"),
         ("principal", "principal"),
         ("proof of transfer", "Proof of Transfer"),
+        ("golem", "Golem"),
+        ("yagna", "Yagna"),
+        ("requestor", "requestor"),
+        ("provider", "provider"),
+        ("agreement", "market agreement"),
+        ("allocation", "allocation"),
+        ("js sdk", "Golem JS SDK"),
+        ("javascript sdk", "Golem JS SDK"),
+        ("python", "Golem Python SDK"),
+        ("ray", "Ray on Golem"),
+        ("dapp", "Golem dApp"),
+        ("gvmi", "GVMI image"),
+        ("task", "task lifecycle"),
+        ("result", "result validation"),
+        ("budget", "budget boundary"),
         ("ston.fi", "STON.fi integration"),
         ("stonfi", "STON.fi integration"),
         ("omniston", "Omniston widget"),
@@ -8696,6 +9393,13 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 
     if raw.contains("basic") || raw.contains("web") || raw.contains("blockchain") {
         "basics".to_string()
+    } else if raw.contains("golem")
+        || raw.contains("yagna")
+        || raw.contains("requestor")
+        || raw.contains("provider")
+        || raw.contains("decentralized compute")
+    {
+        "golem".to_string()
     } else if raw.contains("ton-stonfi")
         || raw.contains("ston.fi")
         || raw.contains("stonfi")
@@ -8724,6 +9428,7 @@ fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static
     match learning_ecosystem_id(request).as_str() {
         "stacks" => "Stacks",
         "ton-stonfi" => "TON / STON.fi",
+        "golem" => "Golem",
         "zcash" => "Zcash",
         "fiber" => "Fiber",
         "ckb" => "CKB",
@@ -8908,6 +9613,10 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             "Generate a final TON / STON.fi safe-swap integration lab for {} with SDK or Omniston widget code, TON Connect wallet boundary, jetton master verification, slippage/min-out checks, referral-fee disclosure, transaction-state evidence, and at least eight denial tests covering fake jettons, stale quotes, missing min-out, wallet rejection, pending-as-success, wrong manifest domain, duplicate connector state, and REST API responses treated as settlement proof.",
             learning_focus_label(request)
         ),
+        "golem" => format!(
+            "Generate a final Golem compute execution quest for {} with requestor/provider boundaries, Yagna/app-key setup, JS SDK or Python/Ray task execution, dApp deployment where relevant, result validation, budget/payment awareness, provider failure handling, and at least seven failure cases covering provider unavailable, task timeout, missing result, corrupted result, wrong image or runtime, agreement mismatch, budget exceeded, Yagna disconnect, and unsupported Ray limitations.",
+            learning_focus_label(request)
+        ),
         "basics" => format!(
             "Generate a beginner Web3 foundations quest for {} with plain-language wallet, transaction, block explorer, network safety, and confirmation reasoning plus one practical denial test.",
             learning_focus_label(request)
@@ -8935,6 +9644,18 @@ fn learning_lesson_role(
             "viewing-key, memo, address, and disclosure boundaries in generated app code",
             "denial testing for malformed requests, transparent memo misuse, replay, wrong-network, and unsafe recipient cases",
             "turning Zcash shielded-checkout understanding into a generated verifier quest",
+        ]
+    } else if discriminator.contains("golem")
+        || discriminator.contains("yagna")
+        || discriminator.contains("requestor")
+        || discriminator.contains("decentralized compute")
+    {
+        [
+            "Golem compute mental model: requestors, providers, Yagna, agreements, tasks, results, and payment boundaries",
+            "Golem JS SDK task execution: packages, task model, provider execution, result handling, and cleanup",
+            "Golem Python and Ray workloads: executor flow, workload splitting, supported versions, and practical limitations",
+            "Golem dApp deployment lifecycle: GVMI, descriptors, services, logs, proxies, and lifecycle control",
+            "turning Golem understanding into a final compute quest with provider, task, result, budget, and failure-state checks",
         ]
     } else if discriminator.contains("ton-stonfi")
         || discriminator.contains("ston.fi")
@@ -9034,6 +9755,12 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         .to_ascii_lowercase();
     if discriminator.contains("zcash") {
         "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
+    } else if discriminator.contains("golem")
+        || discriminator.contains("yagna")
+        || discriminator.contains("requestor")
+        || discriminator.contains("decentralized compute")
+    {
+        "Ground the lesson in Golem decentralized compute execution: requestor/provider separation, Yagna and app keys, agreements and allocations, JS SDK task execution, Python and Ray workload choices, dApp deployment lifecycle, provider selection, budget/payment awareness, result validation, cleanup, and failure cases that prevent treating provider output, UI state, or broad AI/GPU claims as automatically reliable."
     } else if discriminator.contains("ton-stonfi")
         || discriminator.contains("ston.fi")
         || discriminator.contains("stonfi")
@@ -9067,6 +9794,9 @@ fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) 
     match learning_ecosystem_id(request).as_str() {
         "stacks" => {
             "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
+        }
+        "golem" => {
+            "Ground facts in official Golem sources without quoting them. Use at least two relevant source categories from this source pack when possible: Golem docs https://docs.golem.network/, quickstarts https://docs.golem.network/docs/quickstarts, JS SDK https://docs.golem.network/docs/creators/javascript, JS task model https://docs.golem.network/docs/creators/javascript/guides/task-model, JS executing tasks https://docs.golem.network/docs/creators/javascript/examples/executing-tasks, requestor/provider interaction https://docs.golem.network/docs/creators/common/requestor-provider-interaction, Python quickstart https://docs.golem.network/docs/creators/python/quickstarts/run-first-task-on-golem, Python application fundamentals https://docs.golem.network/docs/creators/python/guides/application-fundamentals, Ray on Golem https://docs.golem.network/docs/creators/ray, Ray limitations https://docs.golem.network/docs/creators/ray/supported-versions-and-other-limitations, dApp deployment https://docs.golem.network/docs/creators/dapps/hello-world-dapp, creating dApps https://docs.golem.network/docs/creators/dapps/creating-golem-dapps, provider overview https://docs.golem.network/docs/providers, and provider architecture https://docs.golem.network/docs/golem/overview/provider. Do not use CKB, Fiber, Zcash, Stacks, TON, or STON.fi examples unless the learner explicitly asked to compare ecosystems. Do not claim Golem is a smart-contract chain or that VibeQuest certifies production deployments."
         }
         "ton-stonfi" => {
             "Ground facts in official STON.fi and TON sources without quoting them. Use at least two relevant source categories from this source pack when possible: STON.fi DEX overview https://docs.ston.fi/developer-section/dex/overview, DEX SDK https://docs.ston.fi/developer-section/dex/sdk, DEX smart contracts https://docs.ston.fi/developer-section/dex/smart-contracts, REST API https://docs.ston.fi/developer-section/dex/api, Omniston widget https://docs.ston.fi/developer-section/widget/widget, Omniston SDK https://docs.ston.fi/developer-section/omniston/sdk, TON Connect overview https://docs.ton.org/applications/ton-connect/overview, TON Connect UI reference https://docs.ton.org/applications/ton-connect/api-reference/ui, TON token overview https://docs.ton.org/contracts/standard/tokens/overview, TON jetton processing https://docs.ton.org/applications/payments/jettons, TON jetton interface https://docs.ton.org/contracts/standard/tokens/jettons/api, and TON jetton architecture https://docs.ton.org/contracts/standard/tokens/jettons/how-it-works. Do not use CKB, Fiber, Zcash, or Stacks examples unless the learner explicitly asked to compare ecosystems."
@@ -9138,7 +9868,7 @@ VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}.
 
 Global VibeQuest accuracy standard: teach as if a reviewer will compare every claim against the official source pack. Separate protocol evidence from app state. Name the exact verification boundary, one edge case, one denial test, and one nuance where a common shortcut would be wrong. Do not repeat a prior module's title, opening, checkpoint, code lens, or proof boundary.
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, Proof of Transfer, STON.fi swap quote, Omniston widget config, TON Connect manifest, jetton master address, jetton wallet contract, slippage, min-out, stale quote, referral fee, route, or transaction state. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, Proof of Transfer, STON.fi swap quote, Omniston widget config, TON Connect manifest, jetton master address, jetton wallet contract, slippage, min-out, stale quote, referral fee, route, transaction state, Golem requestor, provider, Yagna app key, agreement, allocation, task, result, budget, JS SDK, Python SDK, Ray limitation, dApp descriptor, GVMI image, service lifecycle, or provider timeout. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -10556,6 +11286,280 @@ mod tests {
             .e
             .push_str(" ZIP-321 zatoshi Orchard receiver should not leak into a Stacks lesson.");
         assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+    }
+
+    #[test]
+    fn golem_learning_request_shapes_sources_validation_and_artifact_tags() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("golem-compute-lab".to_string()),
+            ecosystem_id: Some("golem".to_string()),
+            topic: Some("Golem JS SDK task execution and provider result validation".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec![
+                "Understand decentralized compute boundaries".to_string(),
+                "Include interactive code snippets".to_string(),
+            ],
+            interests: vec![
+                "Golem requestor/provider workflow".to_string(),
+                "Yagna app key".to_string(),
+                "Golem JS SDK".to_string(),
+                "Task lifecycle and failure cases".to_string(),
+            ],
+            learner_goal: "Understand Golem compute execution with task lifecycle, provider failure, and result validation".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let sentence = "A Golem compute lesson must separate requestor intent, Yagna coordination, provider execution, market agreement, allocation budget, task command, result output, and payment boundary before accepting a decentralized compute job as complete. The learner validates provider identity, task lifecycle, expected result shape, cleanup behavior, and cost assumptions instead of treating provider output as automatically trusted. It should reject provider unavailable state, task timeout, missing result, corrupted result, wrong GVMI image, agreement mismatch, budget exceeded, Yagna disconnected, network failure, and Ray limitation assumptions. ";
+        let lesson = AiLearningLessonCompact {
+            t: "Golem requestor/provider task boundary".to_string(),
+            e: format!(
+                "{} Accuracy check: verify each claim against official Golem docs at docs.golem.network, Golem JS SDK documentation, requestor/provider interaction docs, task model docs, executing tasks examples, provider docs, and Ray on Golem limitations before trusting generated compute code. Submodule path: requestor intent -> Yagna app key -> provider agreement -> task execution -> result validation -> failure cases. Further study: read official Golem docs, JS SDK docs, task model docs, requestor/provider docs, and provider documentation.",
+                sentence.repeat(72)
+            ),
+            s: "export function validateGolemTaskResult({ task, result, provider, budget }) {\n  if (!provider?.id) throw new Error('provider-unavailable');\n  if (task.timeoutMs && task.elapsedMs > task.timeoutMs) throw new Error('task-timeout');\n  if (!result?.stdout) throw new Error('missing-result');\n  if (budget.spent > budget.max) throw new Error('budget-exceeded');\n  // Learner edit: add a semantic validator for the expected output.\n  return { providerId: provider.id, outputReady: true };\n}".to_string(),
+            w: "For a backend developer, this matters because generated Golem code can confuse local requestor state, Yagna coordination, provider execution, task output, and payment or budget assumptions. The learner must validate concrete results before accepting decentralized compute output.".to_string(),
+            j: "Build a Golem task execution proof map with failure tests for provider unavailable, task timeout, missing result, corrupted output, wrong GVMI image, agreement mismatch, budget exceeded, and Yagna disconnect.".to_string(),
+            f: "Which failure case would you mutate first to prove provider output is validated before completion?".to_string(),
+            q: "Which Golem requestor, provider, Yagna app key, agreement, allocation budget, task command, result output, and failure-state fields form the compute proof boundary?".to_string(),
+            a: "The requestor intent, Yagna/app key, provider agreement, allocation budget, executed task, validated result, and explicit failure handling".to_string(),
+            b: vec![
+                "The frontend job started label".to_string(),
+                "Any provider output without validation".to_string(),
+                "A generic decentralized cloud claim".to_string(),
+            ],
+            bf: vec![
+                "A UI label can show intent, but it does not prove provider execution or result correctness.".to_string(),
+                "Provider output must be checked against the expected task and result contract.".to_string(),
+                "Marketing language is not execution evidence for a concrete Golem job.".to_string(),
+            ],
+            ci: 2,
+        };
+
+        assert_eq!(learning_ecosystem_label(&request), "Golem");
+        assert!(learning_focus_label(&request).contains("Golem JS SDK"));
+        assert!(
+            learning_module_capstone_prompt(&request)
+                .contains("final Golem compute execution quest")
+        );
+        assert!(learning_focus_directive(&request).contains("requestor/provider separation"));
+        assert!(learning_source_grounding_directive(&request).contains("docs.golem.network"));
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &lesson).is_ok());
+        assert!(
+            infer_learning_concepts("Golem JS SDK requestor provider", &lesson)
+                .iter()
+                .any(|concept| concept == "requestor")
+        );
+        let golem_resources =
+            default_learning_resources_for_focus("Golem JS SDK requestor provider");
+        assert!(
+            golem_resources
+                .iter()
+                .any(|resource| resource.title == "Golem JS SDK")
+        );
+        assert!(
+            golem_resources
+                .iter()
+                .any(|resource| resource.title == "Golem Requestor / Provider Interaction")
+        );
+        assert!(
+            golem_resources
+                .iter()
+                .any(|resource| resource.title == "Ray on Golem Limitations")
+        );
+
+        let mut leaked = lesson.clone();
+        leaked
+            .e
+            .push_str(" ZIP-321 zatoshi Orchard receiver, STON.fi widget, and jetton claims do not belong here.");
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons: vec![
+                compact_ai_lesson_to_learning_lesson(0, "Backend dev", "Golem", &request, lesson)
+                    .unwrap(),
+            ],
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources: default_learning_resources_for_focus("Golem"),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+        let artifact = learning_eval_artifact(&request, &module, provider);
+        assert_eq!(artifact.ecosystem_id, "golem");
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "requestor-provider")
+        );
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "task-lifecycle")
+        );
+        assert!(artifact.code_mode_enabled);
+        assert_eq!(
+            artifact.execution_path.as_deref(),
+            Some("js-sdk-task-execution")
+        );
+        assert!(artifact.task_lifecycle_covered);
+        assert!(artifact.failure_cases_count >= 7);
+        assert!(artifact.denial_tests_count >= 7);
+        assert!(!artifact.final_compute_lab_ready);
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "golem-js-sdk")
+        );
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "golem-requestor-provider")
+        );
+        assert!(
+            artifact
+                .source_categories
+                .iter()
+                .any(|category| category == "golem-js-sdk")
+        );
+        assert!(
+            artifact
+                .source_categories
+                .iter()
+                .any(|category| category == "golem-ray")
+        );
+        assert!(
+            artifact
+                .compute_model_coverage
+                .iter()
+                .any(|item| item == "requestor")
+        );
+    }
+
+    #[test]
+    fn golem_eval_artifact_flags_final_compute_lab_and_unsupported_claims() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("golem-compute-lab".to_string()),
+            ecosystem_id: Some("golem".to_string()),
+            topic: Some("Final Golem compute execution quest".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec!["Include code snippets".to_string()],
+            interests: vec![
+                "Golem JS SDK".to_string(),
+                "Python and Ray on Golem".to_string(),
+                "Golem dApp deployment".to_string(),
+                "Failure-state testing".to_string(),
+            ],
+            learner_goal: "Build and review a final Golem compute execution lab".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let resources = default_learning_resources_for_focus("Golem");
+        let final_lab_text = "Final Golem compute lab: the learner builds one requestor/provider execution plan and one failure matrix. The lab treats local UI state as intent, Yagna as coordination, providers as remote execution, agreements and allocations as budget/payment boundaries, tasks as workload units, and results as evidence that must be validated instead of automatically trusted. It uses official Golem docs at docs.golem.network, JS SDK docs, Python docs, Ray on Golem limitations, dApp docs, provider overview, and requestor/provider interaction docs. The failure cases mutate provider unavailable state, provider timeout, failed task execution, missing result, corrupted result, wrong GVMI image, wrong runtime version, agreement mismatch, budget exceeded, Yagna disconnected, network failure, Ray supported-version limitation, and provider result automatically trusted. The lesson avoids claiming smart contract executes compute, free compute, unlimited GPU, or production certification.";
+        let lessons = (0..5)
+            .map(|index| LearningLesson {
+                id: format!("module-{}-lesson-1", index + 1),
+                title: if index == 4 {
+                    "Final Golem Compute Quest".to_string()
+                } else {
+                    format!("Golem Source-Grounded Compute Boundary {}", index + 1)
+                },
+                why_it_matters: final_lab_text.to_string(),
+                explanation: final_lab_text.to_string(),
+                concepts: vec![
+                    "Golem".to_string(),
+                    "requestor".to_string(),
+                    "provider".to_string(),
+                    "Yagna".to_string(),
+                    "result validation".to_string(),
+                ],
+                submodules: Vec::new(),
+                resources: resources.clone(),
+                evidence_map: Vec::new(),
+                quality_score: LearningQualityScore {
+                    source_coverage: 95,
+                    technical_depth: 95,
+                    checkpoint_quality: 95,
+                    placeholder_free: true,
+                    ecosystem_alignment: true,
+                    passed: true,
+                },
+                checkpoint: LearningCheckpoint {
+                    question: "Which Golem requestor/provider, Yagna, agreement, allocation, task, result, budget, and failure-state evidence makes the final compute lab trustworthy?".to_string(),
+                    options: vec![
+                        LearningOption {
+                            label: "Requestor intent, Yagna/app key, provider agreement, allocation budget, task execution, validated result, and failure matrix".to_string(),
+                            feedback: "Correct compute execution boundary.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A frontend job started label".to_string(),
+                            feedback: "UI state is not remote compute evidence.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A provider output with no validation".to_string(),
+                            feedback: "Provider output still needs validation or retry strategy.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A generic AI/GPU claim".to_string(),
+                            feedback: "AI/GPU claims need current documented support and workload constraints.".to_string(),
+                        },
+                    ],
+                    correct_index: 0,
+                    explanation: "The answer must bind requestor intent, Yagna coordination, provider agreement, budget, task execution, result validation, and failure handling.".to_string(),
+                    follow_up_question: "Which result validator would you add for this workload?".to_string(),
+                },
+                quest_bridge: final_lab_text.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons,
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources,
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+
+        let artifact = learning_eval_artifact(&request, &module, provider);
+
+        assert!(artifact.final_lab_ready);
+        assert!(artifact.final_compute_lab_ready);
+        assert!(artifact.failure_cases_count >= 9);
+        assert!(artifact.denial_tests_count >= 9);
+        assert!(artifact.task_lifecycle_covered);
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("smart-contract execution"))
+        );
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("AI/GPU capability"))
+        );
     }
 
     #[test]
