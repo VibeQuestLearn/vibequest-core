@@ -17,6 +17,7 @@ pub const CKB_ECOSYSTEM_ID: &str = "ckb";
 pub const FIBER_ECOSYSTEM_ID: &str = "fiber";
 pub const STACKS_ECOSYSTEM_ID: &str = "stacks";
 pub const TON_STONFI_ECOSYSTEM_ID: &str = "ton-stonfi";
+pub const GOLEM_ECOSYSTEM_ID: &str = "golem";
 pub const ZCASH_ECOSYSTEM_ID: &str = "zcash";
 pub const SHIELDED_PAYMENTS_TRACK_ID: &str = "shielded-payments-safety";
 
@@ -44,6 +45,7 @@ pub enum EcosystemConfiguration {
     Fiber(GenericEcosystemRegistration),
     Stacks(GenericEcosystemRegistration),
     TonStonfi(GenericEcosystemRegistration),
+    Golem(GenericEcosystemRegistration),
     Zcash(ZcashRegistration),
 }
 
@@ -349,6 +351,41 @@ impl EcosystemRegistry {
                         "slippage and stale quote denial tests",
                         "referral-fee disclosure",
                         "transaction-state evidence",
+                    ],
+                )),
+            ),
+            generic_ecosystem(
+                GOLEM_ECOSYSTEM_ID,
+                "Golem",
+                "Decentralized compute labs for builders learning requestor/provider workflows, SDK task execution, Ray workloads, dApp deployment, and failure-state handling.",
+                EcosystemConfiguration::Golem(generic_registration(
+                    "golem-source-pack-1.0.0",
+                    [
+                        "Golem Ecosystem Fund",
+                        "Golem Docs",
+                        "Golem Quickstarts",
+                        "Golem JS SDK documentation",
+                        "Golem JS task model",
+                        "Golem JS task execution examples",
+                        "Golem requestor/provider interaction documentation",
+                        "Golem Python quickstart",
+                        "Golem Python application fundamentals",
+                        "Ray on Golem documentation",
+                        "Ray on Golem limitations",
+                        "Golem dApp deployment documentation",
+                        "Golem provider overview",
+                        "Golem provider architecture",
+                    ],
+                    [
+                        "requestor and provider mental model",
+                        "Yagna setup and app keys",
+                        "JS SDK task execution",
+                        "Python SDK task execution",
+                        "Ray on Golem workloads",
+                        "dApp deployment lifecycle",
+                        "provider selection and pricing awareness",
+                        "task lifecycle and result handling",
+                        "failure-state denial tests",
                     ],
                 )),
             ),
@@ -786,7 +823,7 @@ mod tests {
         let catalog = registry.catalog();
 
         assert_eq!(catalog.schema_version, SCHEMA_VERSION);
-        assert_eq!(catalog.ecosystems.len(), 6);
+        assert_eq!(catalog.ecosystems.len(), 7);
         assert!(
             catalog
                 .ecosystems
@@ -817,6 +854,16 @@ mod tests {
                 .iter()
                 .any(|ecosystem| ecosystem.ecosystem_id == TON_STONFI_ECOSYSTEM_ID)
         );
+        let golem = catalog
+            .ecosystems
+            .iter()
+            .find(|ecosystem| ecosystem.ecosystem_id == GOLEM_ECOSYSTEM_ID)
+            .expect("Golem compute lab is registered");
+        assert!(golem.summary.contains("Decentralized compute"));
+        assert!(matches!(
+            golem.configuration,
+            EcosystemConfiguration::Golem(_)
+        ));
         let zcash = catalog
             .ecosystems
             .iter()
