@@ -79,6 +79,18 @@ pub struct TrackRegistration {
     pub runner_version: String,
     pub runner_status: RunnerStatus,
     pub lesson_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_proof: Option<TrackReviewProof>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TrackReviewProof {
+    pub proof_label: String,
+    pub sample_topic: String,
+    pub sample_modules: Vec<String>,
+    pub required_artifacts: Vec<String>,
+    pub reviewer_demo_steps: Vec<String>,
+    pub source_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -134,8 +146,104 @@ fn generic_ecosystem(
             runner_version: crate::runner::RUNNER_VERSION.to_string(),
             runner_status: RunnerStatus::ReviewRequired,
             lesson_count: 5,
+            review_proof: None,
         }],
     }
+}
+
+fn golem_review_proof() -> TrackReviewProof {
+    TrackReviewProof {
+        proof_label: "Golem grant proof sample".to_string(),
+        sample_topic: "Golem compute lab: requestor/provider execution, JS SDK task run, result validation, and failure matrix".to_string(),
+        sample_modules: vec![
+            "Compute mental model: requestor intent, provider execution, Yagna coordination, agreements, allocations, results, and payments".to_string(),
+            "JS SDK execution lab: define a task, negotiate compute, collect output, validate result shape, and clean up".to_string(),
+            "Python and Ray pathing: choose the right workload path, split work, respect Ray limitations, and verify outputs".to_string(),
+            "dApp lifecycle: GVMI images, descriptors, services, logs, proxies, health checks, and deployment failure states".to_string(),
+            "Final compute quest: build a proof map, run denial cases, and explain why provider output is not automatically trusted".to_string(),
+        ],
+        required_artifacts: vec![
+            "source-grounded generated course".to_string(),
+            "validation artifact with source IDs and categories".to_string(),
+            "code-mode sample inspected or copied".to_string(),
+            "checkpoint attempt and pass evidence".to_string(),
+            "final compute quest visibility".to_string(),
+            "usage metrics for starts, completions, tutor use, and code-copy events".to_string(),
+        ],
+        reviewer_demo_steps: vec![
+            "Open VibeQuest and sign in with Google".to_string(),
+            "Select Learn, choose Golem, and use the grant-proof sample topic".to_string(),
+            "Enable interactive code samples and generate the course".to_string(),
+            "Open module 1 as soon as it appears while modules 2-5 continue generating".to_string(),
+            "Inspect validation gates, source categories, execution path, failure cases, and code sample".to_string(),
+            "Answer a checkpoint and open the final compute quest path".to_string(),
+        ],
+        source_ids: vec![
+            "golem-ecosystem-fund".to_string(),
+            "golem-docs".to_string(),
+            "golem-quickstarts".to_string(),
+            "golem-js-sdk".to_string(),
+            "golem-js-task-model".to_string(),
+            "golem-js-executing-tasks".to_string(),
+            "golem-requestor-provider".to_string(),
+            "golem-python-quickstart".to_string(),
+            "golem-python-fundamentals".to_string(),
+            "golem-ray".to_string(),
+            "golem-ray-limitations".to_string(),
+            "golem-dapp-hello-world".to_string(),
+            "golem-dapp-creation".to_string(),
+            "golem-provider-overview".to_string(),
+            "golem-provider-architecture".to_string(),
+        ],
+    }
+}
+
+fn golem_ecosystem() -> EcosystemRegistration {
+    let mut ecosystem = generic_ecosystem(
+        GOLEM_ECOSYSTEM_ID,
+        "Golem",
+        "Decentralized compute labs for builders learning requestor/provider workflows, SDK task execution, Ray workloads, dApp deployment, and failure-state handling.",
+        EcosystemConfiguration::Golem(generic_registration(
+            "golem-source-pack-1.0.0",
+            [
+                "Golem Ecosystem Fund",
+                "Golem Docs",
+                "Golem Quickstarts",
+                "Golem JS SDK documentation",
+                "Golem JS task model",
+                "Golem JS task execution examples",
+                "Golem requestor/provider interaction documentation",
+                "Golem Python quickstart",
+                "Golem Python application fundamentals",
+                "Ray on Golem documentation",
+                "Ray on Golem limitations",
+                "Golem dApp deployment documentation",
+                "Golem provider overview",
+                "Golem provider architecture",
+            ],
+            [
+                "requestor and provider mental model",
+                "Yagna setup and app keys",
+                "JS SDK task execution",
+                "Python SDK task execution",
+                "Ray on Golem workloads",
+                "dApp deployment lifecycle",
+                "provider selection and pricing awareness",
+                "task lifecycle and result handling",
+                "failure-state denial tests",
+            ],
+        )),
+    );
+
+    if let Some(track) = ecosystem.tracks.first_mut() {
+        track.track_id = "golem-compute-lab".to_string();
+        track.title = "Golem Compute Lab: Learn, Run, Validate".to_string();
+        track.summary = "A source-grounded compute onboarding track where builders learn Golem requestor/provider execution, inspect SDK paths, and prove failure handling before shipping.".to_string();
+        track.content_version = "2026-08-05.1".to_string();
+        track.review_proof = Some(golem_review_proof());
+    }
+
+    ecosystem
 }
 
 fn zcash_ecosystem() -> EcosystemRegistration {
@@ -164,6 +272,7 @@ fn zcash_ecosystem() -> EcosystemRegistration {
             runner_version: crate::runner::RUNNER_VERSION.to_string(),
             runner_status: RunnerStatus::ReviewRequired,
             lesson_count: 5,
+            review_proof: None,
         }],
     }
 }
@@ -354,41 +463,7 @@ impl EcosystemRegistry {
                     ],
                 )),
             ),
-            generic_ecosystem(
-                GOLEM_ECOSYSTEM_ID,
-                "Golem",
-                "Decentralized compute labs for builders learning requestor/provider workflows, SDK task execution, Ray workloads, dApp deployment, and failure-state handling.",
-                EcosystemConfiguration::Golem(generic_registration(
-                    "golem-source-pack-1.0.0",
-                    [
-                        "Golem Ecosystem Fund",
-                        "Golem Docs",
-                        "Golem Quickstarts",
-                        "Golem JS SDK documentation",
-                        "Golem JS task model",
-                        "Golem JS task execution examples",
-                        "Golem requestor/provider interaction documentation",
-                        "Golem Python quickstart",
-                        "Golem Python application fundamentals",
-                        "Ray on Golem documentation",
-                        "Ray on Golem limitations",
-                        "Golem dApp deployment documentation",
-                        "Golem provider overview",
-                        "Golem provider architecture",
-                    ],
-                    [
-                        "requestor and provider mental model",
-                        "Yagna setup and app keys",
-                        "JS SDK task execution",
-                        "Python SDK task execution",
-                        "Ray on Golem workloads",
-                        "dApp deployment lifecycle",
-                        "provider selection and pricing awareness",
-                        "task lifecycle and result handling",
-                        "failure-state denial tests",
-                    ],
-                )),
-            ),
+            golem_ecosystem(),
         ])
     }
 
@@ -864,6 +939,38 @@ mod tests {
             golem.configuration,
             EcosystemConfiguration::Golem(_)
         ));
+        assert_eq!(golem.tracks[0].track_id, "golem-compute-lab");
+        assert!(golem.tracks[0].summary.contains("source-grounded compute"));
+        let proof = golem.tracks[0]
+            .review_proof
+            .as_ref()
+            .expect("Golem track exposes grant-review proof metadata");
+        assert_eq!(proof.sample_modules.len(), 5);
+        assert!(proof.sample_topic.contains("requestor/provider"));
+        assert!(
+            proof
+                .required_artifacts
+                .iter()
+                .any(|item| item.contains("validation artifact"))
+        );
+        assert!(
+            proof
+                .reviewer_demo_steps
+                .iter()
+                .any(|step| step.contains("module 1"))
+        );
+        assert!(
+            proof
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "golem-js-sdk")
+        );
+        assert!(
+            proof
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "golem-ray-limitations")
+        );
         let zcash = catalog
             .ecosystems
             .iter()
