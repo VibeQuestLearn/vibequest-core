@@ -451,6 +451,22 @@ struct LearningEvalArtifact {
     failure_cases_count: usize,
     #[serde(default)]
     final_compute_lab_ready: bool,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    agent_identity_coverage: Vec<String>,
+    #[serde(default)]
+    signed_action_coverage: bool,
+    #[serde(default)]
+    bounty_workflow_coverage: bool,
+    #[serde(default)]
+    sbtc_payment_proof_coverage: bool,
+    #[serde(default)]
+    reputation_evidence_coverage: bool,
+    #[serde(default)]
+    agent_failure_cases_count: usize,
+    #[serde(default, deserialize_with = "deserialize_string_vec")]
+    unsafe_autonomy_warnings: Vec<String>,
+    #[serde(default)]
+    final_agent_lab_ready: bool,
     generated_at: DateTime<Utc>,
 }
 
@@ -2543,6 +2559,14 @@ fn compact_learning_eval_artifact(
         task_lifecycle_covered: artifact.task_lifecycle_covered,
         failure_cases_count: artifact.failure_cases_count.min(99),
         final_compute_lab_ready: artifact.final_compute_lab_ready,
+        agent_identity_coverage: compact_string_list(artifact.agent_identity_coverage, 12, 80),
+        signed_action_coverage: artifact.signed_action_coverage,
+        bounty_workflow_coverage: artifact.bounty_workflow_coverage,
+        sbtc_payment_proof_coverage: artifact.sbtc_payment_proof_coverage,
+        reputation_evidence_coverage: artifact.reputation_evidence_coverage,
+        agent_failure_cases_count: artifact.agent_failure_cases_count.min(99),
+        unsafe_autonomy_warnings: compact_string_list(artifact.unsafe_autonomy_warnings, 16, 220),
+        final_agent_lab_ready: artifact.final_agent_lab_ready,
         generated_at: artifact.generated_at,
     }
 }
@@ -2685,6 +2709,20 @@ fn learning_source_id_for_url(url: &str) -> Option<&'static str> {
         Some("ton-jetton-interface")
     } else if lower.contains("docs.ton.org/contracts/standard/tokens/jettons/how-it-works") {
         Some("ton-jetton-architecture")
+    } else if lower.contains("aibtc.com/llms.txt") {
+        Some("aibtc-llms")
+    } else if lower.contains("aibtc.com/bounties/new") {
+        Some("aibtc-bounty-new")
+    } else if lower.contains("aibtc.com/docs/bounties.txt") {
+        Some("aibtc-bounties-docs-text")
+    } else if lower.contains("aibtc.com/docs/bounties") {
+        Some("aibtc-bounties-docs")
+    } else if lower.contains("aibtc.com/openapi.json") {
+        Some("aibtc-openapi")
+    } else if lower.ends_with("aibtc.com/bounties") || lower.contains("aibtc.com/bounties?") {
+        Some("aibtc-bounties")
+    } else if lower == "https://aibtc.com" || lower == "https://aibtc.com/" {
+        Some("aibtc-home")
     } else if lower.contains("docs.stacks.co") {
         Some("stacks-docs")
     } else if lower.contains("zcash.readthedocs") {
@@ -2737,6 +2775,12 @@ fn learning_source_category_for_id(id: &str) -> &'static str {
         | "ton-jetton-processing"
         | "ton-jetton-interface"
         | "ton-jetton-architecture" => "jetton-standard",
+        "aibtc-home" | "aibtc-llms" => "aibtc-foundations",
+        "aibtc-bounties"
+        | "aibtc-bounty-new"
+        | "aibtc-bounties-docs"
+        | "aibtc-bounties-docs-text" => "aibtc-bounties",
+        "aibtc-openapi" => "aibtc-api",
         "stacks-docs" => "stacks",
         "zcash-docs" | "zcash-zip-321" => "zcash",
         "ckb-docs" => "ckb",
@@ -2753,6 +2797,9 @@ fn learning_unsupported_claim_warnings(
     let ecosystem_id = learning_ecosystem_id(request);
     if ecosystem_id == "golem" {
         return golem_unsupported_claim_warnings(module);
+    }
+    if ecosystem_id == "aibtc" {
+        return aibtc_unsupported_claim_warnings(module);
     }
     if ecosystem_id != "ton-stonfi" {
         return Vec::new();
@@ -2902,6 +2949,86 @@ fn golem_unsupported_claim_warnings(module: &LearningModule) -> Vec<String> {
     warnings
 }
 
+fn aibtc_unsupported_claim_warnings(module: &LearningModule) -> Vec<String> {
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let mut warnings = Vec::new();
+
+    if risky_phrase_present(
+        &combined,
+        &[
+            "autonomous wallet spending",
+            "autonomous spending",
+            "auto pay",
+            "auto-pay",
+            "automatically posts bounties",
+            "automatically pays rewards",
+            "agent spends without approval",
+            "live autonomous execution",
+        ],
+    ) && !(combined.contains("manual approval")
+        || combined.contains("human approval")
+        || combined.contains("explicit approval"))
+    {
+        warnings.push("AIBTC agent autonomy is overclaimed; wallet actions need explicit user approval and signed-request boundaries.".to_string());
+    }
+    if (combined.contains("private key") || combined.contains("seed phrase"))
+        && !(combined.contains("never share")
+            || combined.contains("do not share")
+            || combined.contains("must not expose")
+            || combined.contains("never expose"))
+    {
+        warnings.push("Secret handling is unsafe or underspecified; lessons must never ask learners to expose private keys or seed phrases.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "escrowed funds",
+            "escrow guarantees",
+            "escrow proves payment",
+            "escrow guarantees payout",
+        ],
+    ) {
+        warnings.push(
+            "Escrow or payout guarantees are being implied without source-backed AIBTC evidence."
+                .to_string(),
+        );
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "pending payment proves",
+            "pending transfer proves",
+            "pending payment is proof",
+            "pending transaction is payment proof",
+        ],
+    ) {
+        warnings.push("Pending payment state is being treated as proof; require confirmed sBTC transfer and memo evidence.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "guaranteed winner split",
+            "guaranteed multiple winners",
+            "automatic reward split",
+            "multi-winner payout guaranteed",
+        ],
+    ) {
+        warnings.push("Bounty payout mechanics are overclaimed; keep fixed-winner and reward assumptions tied to the visible bounty configuration.".to_string());
+    }
+    if risky_phrase_present(
+        &combined,
+        &[
+            "production certified",
+            "certified agent deployment",
+            "production-ready certification",
+        ],
+    ) {
+        warnings.push("The lesson implies production certification; VibeQuest validates learning artifacts, not production agent deployments.".to_string());
+    }
+
+    warnings
+}
+
 fn risky_phrase_present(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(*phrase))
 }
@@ -2928,6 +3055,202 @@ fn learning_module_full_text(module: &LearningModule) -> String {
     )
 }
 
+fn aibtc_agent_identity_coverage(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> Vec<String> {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return Vec::new();
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let mut coverage = Vec::new();
+    for (label, terms) in [
+        (
+            "agent identity",
+            ["agent identity", "agent id", "agent profile"].as_slice(),
+        ),
+        (
+            "BTC signature",
+            ["btc signature", "bitcoin signature"].as_slice(),
+        ),
+        (
+            "STX signature",
+            ["stx signature", "stacks signature"].as_slice(),
+        ),
+        (
+            "signed API action",
+            ["signed api", "signed request", "signed payload"].as_slice(),
+        ),
+        (
+            "bounty workflow",
+            ["bounty", "submission", "reward"].as_slice(),
+        ),
+        (
+            "sBTC payment proof",
+            ["sbtc", "payment proof", "transfer evidence"].as_slice(),
+        ),
+        ("BNTY memo", ["bnty", "memo"].as_slice()),
+        (
+            "work reputation",
+            ["reputation", "work history", "public work"].as_slice(),
+        ),
+        (
+            "x402 paid interaction",
+            ["x402", "paid interaction"].as_slice(),
+        ),
+    ] {
+        if terms.iter().any(|term| combined.contains(*term)) {
+            coverage.push(label.to_string());
+        }
+    }
+    coverage
+}
+
+fn aibtc_signed_action_covered(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return false;
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    (combined.contains("signed") || combined.contains("signature"))
+        && (combined.contains("api")
+            || combined.contains("request")
+            || combined.contains("payload"))
+        && (combined.contains("btc") || combined.contains("stx") || combined.contains("wallet"))
+}
+
+fn aibtc_bounty_workflow_covered(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return false;
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    combined.contains("bounty")
+        && (combined.contains("submission") || combined.contains("submit"))
+        && (combined.contains("reward")
+            || combined.contains("window")
+            || combined.contains("fixed winner")
+            || combined.contains("review"))
+}
+
+fn aibtc_sbtc_payment_proof_covered(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return false;
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    combined.contains("sbtc")
+        && (combined.contains("payment") || combined.contains("transfer"))
+        && (combined.contains("memo")
+            || combined.contains("bnty")
+            || combined.contains("confirmation")
+            || combined.contains("confirmed"))
+}
+
+fn aibtc_reputation_evidence_covered(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return false;
+    }
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    combined.contains("reputation")
+        || combined.contains("work history")
+        || combined.contains("public proof")
+        || combined.contains("evidence trail")
+}
+
+fn aibtc_agent_failure_case_count_for_request(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> usize {
+    if learning_ecosystem_id(request) == "aibtc" {
+        aibtc_agent_failure_case_count(module)
+    } else {
+        0
+    }
+}
+
+fn aibtc_agent_failure_case_count(module: &LearningModule) -> usize {
+    let combined = learning_module_full_text(module).to_ascii_lowercase();
+    let cases = [
+        ["unsigned request", "missing signature", "unsigned payload"].as_slice(),
+        ["wrong signer", "wrong wallet", "signer mismatch"].as_slice(),
+        ["replay", "stale timestamp", "nonce reuse"].as_slice(),
+        ["invalid bounty id", "wrong bounty id", "unknown bounty"].as_slice(),
+        [
+            "submission window closed",
+            "expired bounty",
+            "closed window",
+        ]
+        .as_slice(),
+        ["fixed winner", "overclaim", "multi winner"].as_slice(),
+        ["pending payment", "pending transfer", "pending transaction"].as_slice(),
+        ["missing bnty memo", "wrong memo", "memo mismatch"].as_slice(),
+        [
+            "unconfirmed transfer",
+            "unconfirmed payment",
+            "confirmation depth",
+        ]
+        .as_slice(),
+        ["private key", "seed phrase", "secret leak"].as_slice(),
+        [
+            "autonomous spending",
+            "auto pay",
+            "agent spends without approval",
+        ]
+        .as_slice(),
+        ["escrow overclaim", "escrow guarantees", "escrowed funds"].as_slice(),
+    ];
+    cases
+        .iter()
+        .filter(|terms| terms.iter().any(|term| combined.contains(*term)))
+        .count()
+}
+
+fn aibtc_final_agent_lab_ready(
+    request: &GenerateLearningModuleRequest,
+    module: &LearningModule,
+) -> bool {
+    if learning_ecosystem_id(request) != "aibtc" {
+        return false;
+    }
+    let Some(final_lesson) = module.lessons.last() else {
+        return false;
+    };
+    let final_lesson_marker = module.lessons.len() >= 5
+        || final_lesson.id.starts_with("module-5-")
+        || final_lesson.title.to_ascii_lowercase().contains("final")
+        || final_lesson.title.to_ascii_lowercase().contains("lab")
+        || final_lesson.title.to_ascii_lowercase().contains("quest");
+    if !final_lesson_marker {
+        return false;
+    }
+    let text = format!(
+        "{} {} {} {}",
+        final_lesson.title,
+        final_lesson.explanation,
+        final_lesson.quest_bridge,
+        final_lesson.checkpoint.question
+    )
+    .to_ascii_lowercase();
+
+    (text.contains("final") || text.contains("lab") || text.contains("quest"))
+        && text.contains("aibtc")
+        && text.contains("agent")
+        && text.contains("bounty")
+        && (text.contains("signed") || text.contains("signature"))
+        && (text.contains("sbtc") || text.contains("payment"))
+        && aibtc_agent_failure_case_count(module) >= 6
+}
+
 fn learning_denial_test_count(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
@@ -2935,6 +3258,9 @@ fn learning_denial_test_count(
     let ecosystem_id = learning_ecosystem_id(request);
     if ecosystem_id == "golem" {
         return golem_failure_case_count(module);
+    }
+    if ecosystem_id == "aibtc" {
+        return aibtc_agent_failure_case_count(module);
     }
     if ecosystem_id != "ton-stonfi" {
         return module
@@ -2986,10 +3312,14 @@ fn learning_final_lab_ready(
     request: &GenerateLearningModuleRequest,
     module: &LearningModule,
 ) -> bool {
-    if learning_ecosystem_id(request) == "golem" {
+    let ecosystem_id = learning_ecosystem_id(request);
+    if ecosystem_id == "golem" {
         return golem_final_compute_lab_ready(request, module);
     }
-    if learning_ecosystem_id(request) != "ton-stonfi" {
+    if ecosystem_id == "aibtc" {
+        return aibtc_final_agent_lab_ready(request, module);
+    }
+    if ecosystem_id != "ton-stonfi" {
         return false;
     }
     let Some(final_lesson) = module.lessons.last() else {
@@ -3030,6 +3360,15 @@ fn learning_integration_tags(request: &GenerateLearningModuleRequest) -> Vec<Str
             "dapp-deployment".to_string(),
             "task-lifecycle".to_string(),
             "failure-state".to_string(),
+        ],
+        "aibtc" => vec![
+            "agent-identity".to_string(),
+            "signed-actions".to_string(),
+            "bounty-workflow".to_string(),
+            "sbtc-payment-proof".to_string(),
+            "x402-paid-interactions".to_string(),
+            "work-reputation".to_string(),
+            "unsafe-autonomy-denial".to_string(),
         ],
         "ton-stonfi" => vec![
             "sdk".to_string(),
@@ -3091,6 +3430,18 @@ fn learning_eval_artifact(
     let task_lifecycle_covered = golem_task_lifecycle_covered(request, module);
     let failure_cases_count = golem_failure_case_count_for_request(request, module);
     let final_compute_lab_ready = golem_final_compute_lab_ready(request, module);
+    let agent_identity_coverage = aibtc_agent_identity_coverage(request, module);
+    let signed_action_coverage = aibtc_signed_action_covered(request, module);
+    let bounty_workflow_coverage = aibtc_bounty_workflow_covered(request, module);
+    let sbtc_payment_proof_coverage = aibtc_sbtc_payment_proof_covered(request, module);
+    let reputation_evidence_coverage = aibtc_reputation_evidence_covered(request, module);
+    let agent_failure_cases_count = aibtc_agent_failure_case_count_for_request(request, module);
+    let unsafe_autonomy_warnings = if learning_ecosystem_id(request) == "aibtc" {
+        unsupported_claim_warnings.clone()
+    } else {
+        Vec::new()
+    };
+    let final_agent_lab_ready = aibtc_final_agent_lab_ready(request, module);
 
     LearningEvalArtifact {
         artifact_version: "vibequest-learning-eval-v1".to_string(),
@@ -3117,6 +3468,14 @@ fn learning_eval_artifact(
         task_lifecycle_covered,
         failure_cases_count,
         final_compute_lab_ready,
+        agent_identity_coverage,
+        signed_action_coverage,
+        bounty_workflow_coverage,
+        sbtc_payment_proof_coverage,
+        reputation_evidence_coverage,
+        agent_failure_cases_count,
+        unsafe_autonomy_warnings,
+        final_agent_lab_ready,
         generated_at: Utc::now(),
     }
 }
@@ -7366,6 +7725,41 @@ fn default_learning_resources() -> Vec<LearningResource> {
             reason: "Reference Stacks, Clarity, transactions, wallets, sBTC, and Bitcoin-secured app development.".to_string(),
         },
         LearningResource {
+            title: "AIBTC Home".to_string(),
+            url: "https://aibtc.com/".to_string(),
+            reason: "Reference AIBTC agent-economy context, signed agent actions, public work history, and Bitcoin-on-Stacks positioning.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC LLM Source Map".to_string(),
+            url: "https://aibtc.com/llms.txt".to_string(),
+            reason: "Reference the source map used to keep generated AIBTC lessons grounded in public product and API surfaces.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC Bounties".to_string(),
+            url: "https://aibtc.com/bounties".to_string(),
+            reason: "Reference public bounty discovery, reward context, submission expectations, and reputation signals.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC Bounty Creation".to_string(),
+            url: "https://aibtc.com/bounties/new".to_string(),
+            reason: "Reference the bounty creation surface learners must understand before modelling work requests and reward terms.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC Bounty Workflow Docs".to_string(),
+            url: "https://aibtc.com/docs/bounties".to_string(),
+            reason: "Reference bounty lifecycle, submission/review boundaries, payment evidence, and public work reputation.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC Bounty Workflow Text".to_string(),
+            url: "https://aibtc.com/docs/bounties.txt".to_string(),
+            reason: "Reference lightweight source text for AIBTC bounty workflow grounding in AI-generated lessons.".to_string(),
+        },
+        LearningResource {
+            title: "AIBTC OpenAPI Schema".to_string(),
+            url: "https://aibtc.com/openapi.json".to_string(),
+            reason: "Reference the public API contract for agent, bounty, and action-boundary reasoning.".to_string(),
+        },
+        LearningResource {
             title: "Golem Ecosystem Fund".to_string(),
             url: "https://golem.network/ecosystem".to_string(),
             reason: "Reference Golem ecosystem goals, fund fit, builder value, and decentralized compute growth priorities.".to_string(),
@@ -7511,6 +7905,25 @@ fn default_learning_resources() -> Vec<LearningResource> {
 fn default_learning_resources_for_focus(focus: &str) -> Vec<LearningResource> {
     let lower = focus.to_ascii_lowercase();
     let all = default_learning_resources();
+    if lower.contains("aibtc")
+        || lower.contains("agent lab")
+        || lower.contains("signed agent")
+        || lower.contains("signed action")
+        || lower.contains("bounty workflow")
+        || lower.contains("bounties")
+        || lower.contains("x402")
+    {
+        return all
+            .into_iter()
+            .filter(|resource| {
+                let text = format!("{} {}", resource.title, resource.url).to_ascii_lowercase();
+                text.contains("aibtc.com")
+                    || text.contains("aibtc")
+                    || text.contains("stacks")
+                    || text.contains("docs.stacks")
+            })
+            .collect();
+    }
     if lower.contains("golem")
         || lower.contains("yagna")
         || lower.contains("requestor")
@@ -7807,6 +8220,9 @@ fn normalize_ai_learning_lesson_for_request(
     if learning_ecosystem_id(request) == "golem" {
         normalize_golem_ai_learning_lesson(request, lesson_index, lesson);
     }
+    if learning_ecosystem_id(request) == "aibtc" {
+        normalize_aibtc_ai_learning_lesson(request, lesson_index, lesson);
+    }
 }
 
 fn normalize_code_lens_edit_markers(value: &str) -> String {
@@ -7823,6 +8239,124 @@ fn normalize_learning_side_field(value: &mut String, minimum_words: usize, addit
         return;
     }
     append_learning_sentence(value, addition);
+}
+
+fn normalize_aibtc_ai_learning_lesson(
+    request: &GenerateLearningModuleRequest,
+    lesson_index: usize,
+    lesson: &mut AiLearningLessonCompact,
+) {
+    let source_sentence = "Accuracy check: verify AIBTC claims against official AIBTC surfaces at aibtc.com, aibtc.com/llms.txt, AIBTC bounties, AIBTC bounty workflow documentation, AIBTC OpenAPI schema, and official Stacks documentation before trusting generated agent workflow code.";
+    if !lesson_has_official_source_anchor("aibtc", &learning_lesson_full_text(lesson)) {
+        append_learning_sentence(&mut lesson.e, source_sentence);
+    }
+
+    if !lesson_has_accuracy_nuance(&learning_lesson_full_text(lesson)) {
+        append_learning_sentence(
+            &mut lesson.e,
+            "Failure-case test: reject unsigned requests, wrong signer wallets, replayed nonces, invalid bounty IDs, closed submission windows, fixed-winner overclaims, pending sBTC transfers, missing BNTY memos, unconfirmed payments, private-key exposure, and autonomous spending claims instead of treating an agent UI label as proof.",
+        );
+    }
+
+    if !lesson_mentions_role_specific_terms(
+        "aibtc",
+        lesson_index,
+        &learning_lesson_full_text(lesson).to_ascii_lowercase(),
+    ) {
+        append_learning_sentence(&mut lesson.e, aibtc_role_sentence(lesson_index));
+    }
+
+    if lesson_index >= 4 {
+        append_learning_sentence(&mut lesson.e, aibtc_final_lab_failure_checklist());
+        append_learning_sentence(
+            &mut lesson.j,
+            "Final agent lab artifact: a reviewed AIBTC bounty flow, signed-action validator, sBTC payment-proof map, reputation evidence trail, and denial matrix for unsafe wallet or autonomy assumptions.",
+        );
+    }
+
+    if wants_code_snippets_for_request(request) {
+        lesson.s = aibtc_curated_code_lens(lesson_index).to_string();
+    }
+}
+
+fn aibtc_final_lab_failure_checklist() -> &'static str {
+    "Final AIBTC agent lab failure checklist: unsigned request, wrong signer wallet, replayed nonce, stale timestamp, invalid bounty ID, closed submission window, fixed-winner overclaim, pending payment treated as proof, missing BNTY memo, unconfirmed sBTC transfer, private-key exposure, autonomous spending without explicit approval, escrow overclaim, and public reputation evidence missing."
+}
+
+fn aibtc_curated_code_lens(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            r#"export function validateAibtcAgentIdentity({ agent, btcAddress, stxAddress }) {
+  if (!agent?.id) throw new Error('missing-agent-id');
+  if (!btcAddress || !stxAddress) throw new Error('missing-bitcoin-or-stacks-address');
+  if (agent.claimedBtcAddress !== btcAddress) throw new Error('btc-address-mismatch');
+  if (agent.claimedStxAddress !== stxAddress) throw new Error('stx-address-mismatch');
+  // Learner edit: bind public work history before displaying trust badges.
+  return { agentId: agent.id, btcAddress, stxAddress };
+}"#
+        }
+        1 => {
+            r#"export function validateAibtcSignedAction({ payload, signature, signer, nonce, nowMs }) {
+  if (!signature) throw new Error('missing-signature');
+  if (!payload?.action || payload.signer !== signer) throw new Error('signed-action-mismatch');
+  if (payload.nonce !== nonce) throw new Error('nonce-replay');
+  if (nowMs - payload.issuedAtMs > 60_000) throw new Error('stale-signed-request');
+  // Learner edit: verify the BTC/STX signature with the wallet library used by the app.
+  return { action: payload.action, signer, nonce };
+}"#
+        }
+        2 => {
+            r#"export function validateAibtcBountyPayload({ bounty, submission }) {
+  if (!bounty?.id || submission.bountyId !== bounty.id) throw new Error('invalid-bounty-id');
+  if (Date.now() > bounty.submissionClosesAtMs) throw new Error('submission-window-closed');
+  if (submission.rewardClaim > bounty.rewardAmount) throw new Error('reward-overclaim');
+  // Learner edit: attach the public artifact URL and reviewer state before submission.
+  return { bountyId: bounty.id, artifactUrl: submission.artifactUrl };
+}"#
+        }
+        3 => {
+            r#"export function validateAibtcPaymentProof({ transfer, bountyId }) {
+  if (transfer.asset !== 'sBTC') throw new Error('wrong-payment-asset');
+  if (!transfer.memo?.includes(`BNTY:${bountyId}`)) throw new Error('missing-bnty-memo');
+  if (transfer.confirmations < 1) throw new Error('unconfirmed-transfer');
+  // Learner edit: require the exact recipient and amount from the bounty record.
+  return { txid: transfer.txid, bountyId, confirmed: true };
+}"#
+        }
+        _ => {
+            r#"export function finalAibtcAgentQuestChecks(state) {
+  const failures = [];
+  if (!state.signature) failures.push('unsigned-request');
+  if (state.wrongSignerWallet) failures.push('wrong-signer-wallet');
+  if (state.replayedNonce || state.staleTimestamp) failures.push('replay-risk');
+  if (!state.bountyId || state.submissionWindowClosed) failures.push('invalid-bounty-flow');
+  if (state.pendingPayment || !state.bntyMemo || !state.confirmedSbtcTransfer) failures.push('payment-proof-missing');
+  if (state.privateKeyRequested || state.autonomousSpending) failures.push('unsafe-wallet-boundary');
+  if (!state.publicReputationEvidence) failures.push('missing-reputation-evidence');
+  return { pass: failures.length === 0, failures };
+}"#
+        }
+    }
+}
+
+fn aibtc_role_sentence(lesson_index: usize) -> &'static str {
+    match lesson_index.min(4) {
+        0 => {
+            "Module focus: a safe AIBTC learner separates agent identity, public work history, BTC/STX address claims, and UI reputation labels before trusting an agent profile."
+        }
+        1 => {
+            "Module focus: signed AIBTC actions must bind payload action, signer, BTC/STX wallet proof, nonce, timestamp, and replay boundary before the API accepts intent."
+        }
+        2 => {
+            "Module focus: bounty workflow safety depends on bounty ID, submission window, fixed reward terms, artifact URL, reviewer state, and denial of overclaim or wrong-bounty submissions."
+        }
+        3 => {
+            "Module focus: sBTC payment proof needs exact transfer evidence, BNTY memo binding, confirmation state, and clear separation from pending UI or agent claims."
+        }
+        _ => {
+            "Module focus: the final AIBTC quest ties signed actions, bounty workflow, sBTC payment proof, reputation evidence, and unsafe-autonomy denial into one reviewable artifact."
+        }
+    }
 }
 
 fn normalize_ton_stonfi_ai_learning_lesson(
@@ -8334,6 +8868,18 @@ fn lesson_has_official_source_anchor(ecosystem_id: &str, text: &str) -> bool {
 
 fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static str] {
     match ecosystem_id {
+        "aibtc" => &[
+            "official aibtc",
+            "aibtc",
+            "aibtc docs",
+            "aibtc.com",
+            "aibtc bounties",
+            "bounties documentation",
+            "aibtc openapi",
+            "openapi schema",
+            "stacks documentation",
+            "official stacks",
+        ],
         "stacks" => &[
             "official stacks",
             "stacks documentation",
@@ -8421,6 +8967,10 @@ fn official_source_terms_for_ecosystem(ecosystem_id: &str) -> &'static [&'static
             "docs.golem.network",
             "golem js sdk",
             "ray on golem",
+            "official aibtc",
+            "aibtc.com",
+            "aibtc bounties",
+            "aibtc openapi",
             "ethereum developer docs",
             "mdn web docs",
             "source pack",
@@ -8528,6 +9078,11 @@ fn role_specific_terms(ecosystem_id: &str, lesson_index: usize) -> &'static [&'s
             "payment evidence",
             "completion",
         ],
+        ("aibtc", 0) => &["agent", "identity", "reputation", "work history", "signed"],
+        ("aibtc", 1) => &["btc", "stx", "signature", "signed", "replay"],
+        ("aibtc", 2) => &["bounty", "submission", "reward", "window", "artifact"],
+        ("aibtc", 3) => &["sbtc", "payment", "memo", "bnty", "confirmed"],
+        ("aibtc", 4) => &["quest", "agent", "bounty", "failure", "payment proof"],
         ("stacks", 0) => &[
             "bitcoin",
             "proof of transfer",
@@ -8765,6 +9320,19 @@ fn lesson_mentions_required_ecosystem_terms(ecosystem_id: &str, text: &str) -> b
             "proof of transfer",
             "bitcoin",
         ],
+        "aibtc" => &[
+            "aibtc",
+            "agent",
+            "signed",
+            "signature",
+            "bounty",
+            "sbtc",
+            "payment proof",
+            "reputation",
+            "stacks",
+            "btc",
+            "stx",
+        ],
         "golem" => &[
             "golem",
             "yagna",
@@ -8839,6 +9407,22 @@ fn contains_unrequested_ecosystem_leakage(
     }
 
     let blocked: &[&str] = match ecosystem_id {
+        "aibtc" => &[
+            "joyid",
+            "xudt",
+            "fiber invoice",
+            "ckb cell",
+            "outpoint lineage",
+            "zip-321",
+            "zatoshi",
+            "orchard receiver",
+            "golem",
+            "yagna",
+            "ston.fi",
+            "omniston",
+            "ton connect",
+            "jetton",
+        ],
         "stacks" => &[
             "joyid",
             "xudt",
@@ -8846,6 +9430,9 @@ fn contains_unrequested_ecosystem_leakage(
             "zip-321",
             "zatoshi",
             "orchard receiver",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "golem" => &[
             "joyid",
@@ -8863,6 +9450,9 @@ fn contains_unrequested_ecosystem_leakage(
             "omniston",
             "ton connect",
             "jetton",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "ton-stonfi" => &[
             "joyid",
@@ -8875,6 +9465,9 @@ fn contains_unrequested_ecosystem_leakage(
             "clarity contract",
             "sbtc",
             "bns",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "zcash" => &[
             "joyid",
@@ -8884,6 +9477,9 @@ fn contains_unrequested_ecosystem_leakage(
             "outpoint lineage",
             "clarity contract",
             "sbtc",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "ckb" => &[
             "zip-321",
@@ -8893,6 +9489,9 @@ fn contains_unrequested_ecosystem_leakage(
             "clarity",
             "sbtc",
             "bns",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "fiber" => &[
             "zip-321",
@@ -8902,6 +9501,9 @@ fn contains_unrequested_ecosystem_leakage(
             "clarity",
             "sbtc",
             "bns",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         "ckb-fiber" => &[
             "zip-321",
@@ -8911,6 +9513,9 @@ fn contains_unrequested_ecosystem_leakage(
             "clarity",
             "sbtc",
             "bns",
+            "aibtc",
+            "x402",
+            "bnty memo",
         ],
         _ => &[],
     };
@@ -8993,6 +9598,19 @@ fn generic_learning_checkpoint_question(question: &str) -> bool {
         "min-out",
         "quote",
         "route",
+        "aibtc",
+        "agent",
+        "btc signature",
+        "stx signature",
+        "signed api request",
+        "bounty id",
+        "submission window",
+        "fixed reward",
+        "sbtc payment proof",
+        "bnty memo",
+        "x402 payment",
+        "agent reputation",
+        "work history",
     ]
     .iter()
     .any(|term| lower.contains(term));
@@ -9308,6 +9926,17 @@ fn infer_learning_concepts(focus: &str, lesson: &AiLearningLessonCompact) -> Vec
 
     let mut concepts = Vec::new();
     for (needle, concept) in [
+        ("aibtc", "AIBTC"),
+        ("agent id", "agent identity"),
+        ("agent identity", "agent identity"),
+        ("btc signature", "BTC signature"),
+        ("stx signature", "STX signature"),
+        ("signed api", "signed API request"),
+        ("signed request", "signed API request"),
+        ("bounty", "bounty workflow"),
+        ("bnty", "BNTY memo"),
+        ("x402", "x402 paid interaction"),
+        ("reputation", "work reputation"),
         ("cell", "CKB cell"),
         ("outpoint", "OutPoint"),
         ("script", "script"),
@@ -9407,6 +10036,15 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
         || raw.contains("jetton")
     {
         "ton-stonfi".to_string()
+    } else if raw.contains("aibtc")
+        || raw.contains("agent lab")
+        || raw.contains("signed agent")
+        || raw.contains("stacks agent")
+        || raw.contains("bounty workflow")
+        || raw.contains("bnty")
+        || raw.contains("x402")
+    {
+        "aibtc".to_string()
     } else if raw.contains("stacks")
         || raw.contains("clarity")
         || raw.contains("sbtc")
@@ -9426,6 +10064,7 @@ fn learning_ecosystem_id(request: &GenerateLearningModuleRequest) -> String {
 
 fn learning_ecosystem_label(request: &GenerateLearningModuleRequest) -> &'static str {
     match learning_ecosystem_id(request).as_str() {
+        "aibtc" => "AIBTC / Stacks Agents",
         "stacks" => "Stacks",
         "ton-stonfi" => "TON / STON.fi",
         "golem" => "Golem",
@@ -9484,6 +10123,8 @@ fn clean_learning_module_title(raw: &str) -> String {
     let mut cleaned = title.to_string();
     for ecosystem in [
         "Golem",
+        "AIBTC / Stacks Agents",
+        "AIBTC",
         "Stacks",
         "TON / STON.fi",
         "STON.fi",
@@ -9606,6 +10247,10 @@ fn learning_module_capstone_prompt(request: &GenerateLearningModuleRequest) -> S
             "Generate a CKB verifier quest for {} with cell, script, witness, or transaction proof binding plus denial tests and server-owned completion evidence.",
             learning_focus_label(request)
         ),
+        "aibtc" => format!(
+            "Generate a final AIBTC agent lab for {} with agent identity, BTC/STX signed action validation, bounty submission workflow, sBTC payment proof with BNTY memo evidence, public reputation trail, x402 paid interaction awareness, and at least eight denial tests covering unsigned requests, wrong signer, replay, invalid bounty ID, closed submission window, fixed-winner overclaim, pending payment, missing BNTY memo, unconfirmed transfer, private-key exposure, and autonomous spending without explicit approval.",
+            learning_focus_label(request)
+        ),
         "stacks" => format!(
             "Generate a Stacks learning quest for {} with Stacks/Bitcoin reasoning, Clarity-safe authorization, sBTC or BNS product context where relevant, checkpoint evidence, and one denial test for unsafe app assumptions.",
             learning_focus_label(request)
@@ -9638,7 +10283,21 @@ fn learning_lesson_role(
         .as_deref()
         .unwrap_or_else(|| request.ecosystem_id.as_deref().unwrap_or_default())
         .to_ascii_lowercase();
-    let roles = if discriminator.contains("zcash") {
+    let roles = if discriminator.contains("aibtc")
+        || discriminator.contains("agent lab")
+        || discriminator.contains("signed agent")
+        || discriminator.contains("bounty workflow")
+        || discriminator.contains("bnty")
+        || discriminator.contains("x402")
+    {
+        [
+            "AIBTC agent-economy mental model: agent identity, public work history, signed actions, and reputation claim boundaries",
+            "agent registration and signed API actions: BTC/STX signatures, signer scope, nonce freshness, timestamp expiry, and replay denial",
+            "AIBTC bounty workflow: bounty ID, submission window, fixed reward terms, artifact proof, reviewer state, and overclaim denial",
+            "sBTC payment proof: transfer evidence, BNTY memo binding, confirmation state, and pending payment denial",
+            "turning AIBTC understanding into a final agent quest with signed action, bounty, payment-proof, reputation, and unsafe-autonomy checks",
+        ]
+    } else if discriminator.contains("zcash") {
         [
             "shielded-payment mental model and privacy-preserving checkout scope",
             "ZIP-321/payment request structure, recipient safety, amount bounds, and network mismatch denial",
@@ -9754,7 +10413,15 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
         .as_deref()
         .unwrap_or_else(|| request.ecosystem_id.as_deref().unwrap_or_default())
         .to_ascii_lowercase();
-    if discriminator.contains("zcash") {
+    if discriminator.contains("aibtc")
+        || discriminator.contains("agent lab")
+        || discriminator.contains("signed agent")
+        || discriminator.contains("bounty workflow")
+        || discriminator.contains("bnty")
+        || discriminator.contains("x402")
+    {
+        "Ground the lesson in AIBTC agent-economy execution: agent identity, public work history, BTC/STX signed actions, signed API payloads, bounty creation and submission, fixed reward and submission-window assumptions, sBTC payment proof, BNTY memo evidence, x402 paid interactions, reputation signals, and denial cases that prevent trusting UI state, pending payment, unsigned requests, leaked secrets, or autonomous spending claims."
+    } else if discriminator.contains("zcash") {
         "Ground the lesson in Zcash shielded-payment UX, ZIP-321/payment requests, address/network safety, viewing-key and memo disclosure boundaries, payment lifecycle, privacy expectations, and denial cases that a generated checkout verifier must reject."
     } else if discriminator.contains("golem")
         || discriminator.contains("yagna")
@@ -9793,6 +10460,9 @@ fn learning_focus_directive(request: &GenerateLearningModuleRequest) -> &'static
 
 fn learning_source_grounding_directive(request: &GenerateLearningModuleRequest) -> &'static str {
     match learning_ecosystem_id(request).as_str() {
+        "aibtc" => {
+            "Ground facts in official AIBTC and Stacks sources without quoting them. Use AIBTC home https://aibtc.com/, AIBTC LLM source map https://aibtc.com/llms.txt, AIBTC bounties https://aibtc.com/bounties, bounty creation https://aibtc.com/bounties/new, bounty workflow documentation https://aibtc.com/docs/bounties, AIBTC OpenAPI schema https://aibtc.com/openapi.json, and Stacks docs https://docs.stacks.co/. Do not create wallets, request private keys, submit bounties, register agents, or imply autonomous spending. Every AIBTC module must identify the signed-action boundary, bounty-workflow evidence, payment-proof evidence, and one denial case."
+        }
         "stacks" => {
             "Ground facts in official Stacks sources without quoting them: Stacks docs https://docs.stacks.co/ for Stacks/Bitcoin, Clarity, wallets, transactions, sBTC, and BNS concepts. Do not use CKB, Fiber, or Zcash examples unless the learner explicitly asked to compare ecosystems."
         }
@@ -9869,7 +10539,7 @@ VibeQuest module {module_number}/5. Role: {module_role}. Interests: {interests}.
 
 Global VibeQuest accuracy standard: teach as if a reviewer will compare every claim against the official source pack. Separate protocol evidence from app state. Name the exact verification boundary, one edge case, one denial test, and one nuance where a common shortcut would be wrong. Do not repeat a prior module's title, opening, checkpoint, code lens, or proof boundary.
 
-e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, Proof of Transfer, STON.fi swap quote, Omniston widget config, TON Connect manifest, jetton master address, jetton wallet contract, slippage, min-out, stale quote, referral fee, route, transaction state, Golem requestor, provider, Yagna app key, agreement, allocation, task, result, budget, JS SDK, Python SDK, Ray limitation, dApp descriptor, GVMI image, service lifecycle, or provider timeout. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
+e must be at least 520 words of real teaching prose with paragraphs. Define the key terms, explain how the idea appears in generated TypeScript or Rust, name one realistic builder mistake, describe one denial-test idea, include one nested submodule path using the phrase "Submodule path:", include one sentence starting with "Accuracy check:" that tells the learner how to verify the claim against official docs/specs, and add a short "Further study:" sentence naming official docs/specs to read. {code_snippet_directive} w is 35-60 words on why it matters to this speciality. j is 22-45 words naming the practice quest artifact and denial test. f is one follow-up reasoning question. q is one checkpoint about this lesson's exact proof boundary and must name concrete fields or concepts from the selected ecosystem, such as cell, OutPoint, witness, script, channel, invoice, nonce, PTLC, ZIP-321 request, zatoshi amount, shielded address, viewing key, memo, wallet address, signature domain, transaction hash, node, mempool, confirmation depth, Stacks block, Clarity contract, principal, post-condition, sBTC, BNS name, Proof of Transfer, AIBTC agent ID, BTC signature, STX signature, signed API request, bounty ID, submission window, fixed reward, sBTC transfer, BNTY memo, x402 payment, reputation evidence, STON.fi swap quote, Omniston widget config, TON Connect manifest, jetton master address, jetton wallet contract, slippage, min-out, stale quote, referral fee, route, transaction state, Golem requestor, provider, Yagna app key, agreement, allocation, task, result, budget, JS SDK, Python SDK, Ray limitation, dApp descriptor, GVMI image, service lifecycle, or provider timeout. Do not ask generic questions like "What is the exact proof boundary for this lesson?". a is the specific correct answer. b has exactly 3 plausible wrong answer labels. bf has exactly 3 matching feedback strings. ci is 0-3 and must vary. Avoid meta labels such as old fallback wording. Seed: {nonce}."#,
         module_number = lesson_index + 1,
         module_role = learning_lesson_role(request, lesson_index),
         goal = request.learner_goal.trim(),
@@ -11566,6 +12236,272 @@ mod tests {
                 .unsupported_claim_warnings
                 .iter()
                 .any(|warning| warning.contains("AI/GPU capability"))
+        );
+    }
+
+    #[test]
+    fn aibtc_learning_request_shapes_sources_validation_and_artifact_tags() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("aibtc-agent-lab".to_string()),
+            ecosystem_id: Some("aibtc".to_string()),
+            topic: Some("AIBTC signed agent actions, bounties, and sBTC payment proof".to_string()),
+            learning_profile: Some("Backend dev".to_string()),
+            learning_intents: vec![
+                "Understand signed agent actions".to_string(),
+                "Include interactive code snippets".to_string(),
+            ],
+            interests: vec![
+                "AIBTC agent identity".to_string(),
+                "Signed BTC/STX actions".to_string(),
+                "Bounty workflow".to_string(),
+                "sBTC payment proof".to_string(),
+            ],
+            learner_goal: "Understand AIBTC bounty workflows with signed requests, payment proof, and reputation evidence".to_string(),
+            background: "Backend dev".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let sentence = "An AIBTC agent lab lesson must separate agent identity, public work history, BTC signature, STX signature, signed API request payload, nonce, timestamp, bounty ID, submission window, fixed reward terms, artifact URL, reviewer state, sBTC transfer evidence, BNTY memo, confirmation depth, x402 paid interaction context, and reputation evidence before accepting an agent or bounty action as complete. The learner validates official AIBTC source-pack claims, AIBTC bounties, AIBTC OpenAPI schema, and official Stacks documentation instead of treating an agent UI label, pending payment, unsigned payload, or public profile claim as proof. It should reject unsigned request, wrong signer wallet, replayed nonce, stale timestamp, invalid bounty ID, submission window closed, fixed winner overclaim, pending payment, missing BNTY memo, unconfirmed transfer, private key exposure, autonomous spending, and escrow overclaim. ";
+        let lesson = AiLearningLessonCompact {
+            t: "AIBTC signed action and bounty boundary".to_string(),
+            e: format!(
+                "{} Accuracy check: verify each claim against official AIBTC sources at aibtc.com, AIBTC bounties, AIBTC bounty workflow documentation, AIBTC OpenAPI schema, and official Stacks documentation before trusting generated agent workflow code. Submodule path: agent identity -> signed BTC/STX request -> bounty ID -> submission evidence -> sBTC payment proof -> reputation denial tests. Further study: read official AIBTC bounties, the AIBTC OpenAPI schema, and official Stacks documentation.",
+                sentence.repeat(72)
+            ),
+            s: "export function validateAibtcSignedAction({ payload, signature, signer, nonce }) {\n  if (!signature) throw new Error('missing-signature');\n  if (payload.signer !== signer) throw new Error('wrong-signer-wallet');\n  if (payload.nonce !== nonce) throw new Error('replay-risk');\n  // Learner edit: verify the BTC/STX signature with the wallet library used by the app.\n  return { action: payload.action, signer, nonce };\n}".to_string(),
+            w: "For a backend developer, this matters because generated AIBTC code can confuse a public agent profile, signed request, bounty submission, sBTC payment, and reputation evidence. The learner must validate the signed boundary before storing progress or reward state.".to_string(),
+            j: "Build an AIBTC signed-action proof map with denial tests for wrong signer wallets, replayed nonces, invalid bounty IDs, closed windows, missing BNTY memos, and pending payments.".to_string(),
+            f: "Which field would you mutate first to prove the API rejects a replayed agent action?".to_string(),
+            q: "Which AIBTC agent ID, BTC signature, STX signature, signed API request, bounty ID, submission window, fixed reward, sBTC transfer, BNTY memo, and reputation evidence form the proof boundary?".to_string(),
+            a: "The exact agent identity, signer wallet, signed payload, nonce, bounty record, submission artifact, confirmed sBTC transfer with BNTY memo, and public reputation evidence".to_string(),
+            b: vec![
+                "The agent profile name and UI success toast".to_string(),
+                "A pending payment label with no confirmation".to_string(),
+                "A bounty title copied into the frontend".to_string(),
+            ],
+            bf: vec![
+                "A profile label is useful context, but it is not signed action or payment evidence.".to_string(),
+                "Pending state can disappear or fail, so it cannot prove a bounty was paid.".to_string(),
+                "A title does not bind the submitted artifact to the exact bounty ID or reward terms.".to_string(),
+            ],
+            ci: 1,
+        };
+
+        assert_eq!(learning_ecosystem_label(&request), "AIBTC / Stacks Agents");
+        assert!(learning_focus_label(&request).contains("AIBTC signed agent actions"));
+        assert!(learning_module_capstone_prompt(&request).contains("final AIBTC agent lab"));
+        assert!(learning_focus_directive(&request).contains("AIBTC agent-economy execution"));
+        assert!(learning_source_grounding_directive(&request).contains("aibtc.com/llms.txt"));
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &lesson).is_ok());
+        assert!(
+            infer_learning_concepts("AIBTC signed API bounty sBTC BNTY reputation", &lesson)
+                .iter()
+                .any(|concept| concept == "AIBTC")
+        );
+        let aibtc_resources = default_learning_resources_for_focus("AIBTC agent bounty workflow");
+        assert!(
+            aibtc_resources
+                .iter()
+                .any(|resource| resource.title == "AIBTC Bounty Workflow Docs")
+        );
+        assert!(
+            aibtc_resources
+                .iter()
+                .any(|resource| resource.title == "AIBTC OpenAPI Schema")
+        );
+
+        let mut leaked = lesson.clone();
+        leaked.e.push_str(
+            " ZIP-321 zatoshi Orchard receiver, STON.fi widget, jetton, Golem Yagna, and CKB cell claims do not belong here.",
+        );
+        assert!(validate_ai_learning_lesson_compact_for_request(&request, &leaked).is_err());
+
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons: vec![
+                compact_ai_lesson_to_learning_lesson(
+                    1,
+                    "Backend dev",
+                    "AIBTC / Stacks Agents",
+                    &request,
+                    lesson,
+                )
+                .unwrap(),
+            ],
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources: default_learning_resources_for_focus("AIBTC agent bounty workflow"),
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+        let artifact = learning_eval_artifact(&request, &module, provider);
+        assert_eq!(artifact.ecosystem_id, "aibtc");
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "signed-actions")
+        );
+        assert!(
+            artifact
+                .integration_tags
+                .iter()
+                .any(|tag| tag == "bounty-workflow")
+        );
+        assert!(artifact.code_mode_enabled);
+        assert!(artifact.signed_action_coverage);
+        assert!(artifact.bounty_workflow_coverage);
+        assert!(artifact.sbtc_payment_proof_coverage);
+        assert!(artifact.reputation_evidence_coverage);
+        assert!(artifact.agent_failure_cases_count >= 8);
+        assert!(artifact.denial_tests_count >= 8);
+        assert!(!artifact.final_agent_lab_ready);
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "aibtc-bounties-docs")
+        );
+        assert!(
+            artifact
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "aibtc-openapi")
+        );
+        assert!(
+            artifact
+                .agent_identity_coverage
+                .iter()
+                .any(|item| item == "agent identity")
+        );
+    }
+
+    #[test]
+    fn aibtc_eval_artifact_flags_final_agent_lab_and_unsafe_claims() {
+        let request = GenerateLearningModuleRequest {
+            path_id: Some("aibtc-agent-lab".to_string()),
+            ecosystem_id: Some("aibtc".to_string()),
+            topic: Some("Final AIBTC agent bounty quest".to_string()),
+            learning_profile: Some("Security auditor".to_string()),
+            learning_intents: vec!["Include code snippets".to_string()],
+            interests: vec![
+                "AIBTC signed actions".to_string(),
+                "AIBTC bounties".to_string(),
+                "sBTC payment proof".to_string(),
+                "unsafe autonomy denial".to_string(),
+            ],
+            learner_goal: "Build and review a final AIBTC agent lab".to_string(),
+            background: "Security auditor".to_string(),
+            pace: "Audit-heavy".to_string(),
+        };
+        let resources = default_learning_resources_for_focus("AIBTC");
+        let final_lab_text = "Final AIBTC agent lab: the learner builds one signed action validator, one bounty workflow map, one sBTC payment-proof map, and one public reputation evidence trail. The lab uses official AIBTC sources at aibtc.com, AIBTC bounties, AIBTC bounty workflow documentation, AIBTC OpenAPI schema, and official Stacks documentation. It binds agent identity, BTC signature, STX signature, signed API request payload, nonce, timestamp, bounty ID, submission window, fixed reward, artifact URL, reviewer state, sBTC transfer evidence, BNTY memo, confirmation depth, x402 paid interaction context, and reputation evidence. The failure cases mutate unsigned request, missing signature, wrong signer wallet, replayed nonce, stale timestamp, invalid bounty ID, submission window closed, fixed winner overclaim, pending payment proves completion, missing BNTY memo, wrong memo, unconfirmed transfer, private key requested by generated code, autonomous spending, escrowed funds, and escrow overclaim.";
+        let lessons = (0..5)
+            .map(|index| LearningLesson {
+                id: format!("module-{}-lesson-1", index + 1),
+                title: if index == 4 {
+                    "Final AIBTC Agent Quest".to_string()
+                } else {
+                    format!("AIBTC Source-Grounded Agent Boundary {}", index + 1)
+                },
+                why_it_matters: final_lab_text.to_string(),
+                explanation: final_lab_text.to_string(),
+                concepts: vec![
+                    "AIBTC".to_string(),
+                    "agent identity".to_string(),
+                    "signed API request".to_string(),
+                    "bounty workflow".to_string(),
+                    "sBTC payment proof".to_string(),
+                ],
+                submodules: Vec::new(),
+                resources: resources.clone(),
+                evidence_map: Vec::new(),
+                quality_score: LearningQualityScore {
+                    source_coverage: 95,
+                    technical_depth: 95,
+                    checkpoint_quality: 95,
+                    placeholder_free: true,
+                    ecosystem_alignment: true,
+                    passed: true,
+                },
+                checkpoint: LearningCheckpoint {
+                    question: "Which AIBTC agent ID, BTC signature, STX signature, signed API request, bounty ID, submission window, fixed reward, sBTC transfer, BNTY memo, x402 payment, and reputation evidence makes the final agent lab trustworthy?".to_string(),
+                    options: vec![
+                        LearningOption {
+                            label: "Agent identity, signed payload, nonce, bounty record, submission artifact, confirmed sBTC transfer with BNTY memo, and public reputation evidence".to_string(),
+                            feedback: "Correct AIBTC agent lab boundary.".to_string(),
+                        },
+                        LearningOption {
+                            label: "A connected wallet label".to_string(),
+                            feedback: "A wallet label does not prove this signed action or payment.".to_string(),
+                        },
+                        LearningOption {
+                            label: "Pending payment status".to_string(),
+                            feedback: "Pending state is not confirmed payment proof.".to_string(),
+                        },
+                        LearningOption {
+                            label: "An agent profile badge alone".to_string(),
+                            feedback: "A badge is not signed action, bounty, or payment evidence.".to_string(),
+                        },
+                    ],
+                    correct_index: 0,
+                    explanation: "The answer must bind signed action evidence, bounty workflow state, confirmed payment proof, and reputation evidence.".to_string(),
+                    follow_up_question: "Which denial case proves the learner did not trust pending payment state?".to_string(),
+                },
+                quest_bridge: final_lab_text.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let module = LearningModule {
+            title: learning_module_title(&request),
+            learner_profile: learning_module_profile(&request),
+            outcome: learning_module_outcome(&request),
+            lessons,
+            capstone_quest_prompt: learning_module_capstone_prompt(&request),
+            resources,
+        };
+        let provider = AiProviderMetadata {
+            provider_kind: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            endpoint_origin: "https://share-ai.ckbdev.com".to_string(),
+            reasoning_effort: ReasoningEffort::Minimal,
+            response_storage_disabled: true,
+            timeout_seconds: 90,
+            configured: true,
+        };
+
+        let artifact = learning_eval_artifact(&request, &module, provider);
+
+        assert!(artifact.final_lab_ready);
+        assert!(artifact.final_agent_lab_ready);
+        assert!(artifact.agent_failure_cases_count >= 10);
+        assert!(artifact.signed_action_coverage);
+        assert!(artifact.bounty_workflow_coverage);
+        assert!(artifact.sbtc_payment_proof_coverage);
+        assert!(artifact.reputation_evidence_coverage);
+        assert!(
+            artifact
+                .unsafe_autonomy_warnings
+                .iter()
+                .any(|warning| warning.contains("wallet actions need explicit user approval"))
+        );
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("Private") || warning.contains("Secret handling"))
+        );
+        assert!(
+            artifact
+                .unsupported_claim_warnings
+                .iter()
+                .any(|warning| warning.contains("Pending payment state"))
         );
     }
 

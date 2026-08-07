@@ -18,6 +18,7 @@ pub const FIBER_ECOSYSTEM_ID: &str = "fiber";
 pub const STACKS_ECOSYSTEM_ID: &str = "stacks";
 pub const TON_STONFI_ECOSYSTEM_ID: &str = "ton-stonfi";
 pub const GOLEM_ECOSYSTEM_ID: &str = "golem";
+pub const AIBTC_ECOSYSTEM_ID: &str = "aibtc";
 pub const ZCASH_ECOSYSTEM_ID: &str = "zcash";
 pub const SHIELDED_PAYMENTS_TRACK_ID: &str = "shielded-payments-safety";
 
@@ -46,6 +47,7 @@ pub enum EcosystemConfiguration {
     Stacks(GenericEcosystemRegistration),
     TonStonfi(GenericEcosystemRegistration),
     Golem(GenericEcosystemRegistration),
+    Aibtc(GenericEcosystemRegistration),
     Zcash(ZcashRegistration),
 }
 
@@ -196,6 +198,84 @@ fn golem_review_proof() -> TrackReviewProof {
             "golem-provider-architecture".to_string(),
         ],
     }
+}
+
+fn aibtc_review_proof() -> TrackReviewProof {
+    TrackReviewProof {
+        proof_label: "AIBTC agent lab proof sample".to_string(),
+        sample_topic: "AIBTC agent lab: signed agent actions, bounty workflow, sBTC payment proof, and reputation evidence".to_string(),
+        sample_modules: vec![
+            "Agent economy mental model: agent identity, public work history, signed actions, and UI claim boundaries".to_string(),
+            "Agent registration and signed actions: BTC/STX signatures, request scope, replay risk, and verification fields".to_string(),
+            "Bounty workflow: bounty fields, submission window, fixed-winner assumptions, proof artifact, and review state".to_string(),
+            "sBTC payment proof: transfer evidence, BNTY memo binding, confirmation state, and reputation trail".to_string(),
+            "Final agent quest: design a safe bounty flow, validate signed payloads, and reject unsafe payment or autonomy claims".to_string(),
+        ],
+        required_artifacts: vec![
+            "source-grounded generated AIBTC course".to_string(),
+            "validation artifact with AIBTC source IDs and signed-action coverage".to_string(),
+            "code-mode sample for safe payload or proof validation".to_string(),
+            "checkpoint attempt and pass evidence".to_string(),
+            "final agent quest visibility".to_string(),
+            "usage metrics for starts, completions, tutor use, and code-copy events".to_string(),
+        ],
+        reviewer_demo_steps: vec![
+            "Open VibeQuest and sign in with Google".to_string(),
+            "Select Learn, choose AIBTC / Stacks Agents, and use the sample topic".to_string(),
+            "Enable optional code samples and generate the course".to_string(),
+            "Inspect source categories, signed-action coverage, bounty coverage, and payment-proof coverage".to_string(),
+            "Answer a checkpoint and confirm the final agent quest path is visible".to_string(),
+        ],
+        source_ids: vec![
+            "aibtc-home".to_string(),
+            "aibtc-llms".to_string(),
+            "aibtc-bounties".to_string(),
+            "aibtc-bounty-new".to_string(),
+            "aibtc-bounties-docs".to_string(),
+            "aibtc-openapi".to_string(),
+            "stacks-docs".to_string(),
+        ],
+    }
+}
+
+fn aibtc_ecosystem() -> EcosystemRegistration {
+    let mut ecosystem = generic_ecosystem(
+        AIBTC_ECOSYSTEM_ID,
+        "AIBTC / Stacks Agents",
+        "Agent-economy learning paths for signed AIBTC actions, bounty workflows, sBTC payment proof, Stacks identity, and public work reputation.",
+        EcosystemConfiguration::Aibtc(generic_registration(
+            "aibtc-source-pack-1.0.0",
+            [
+                "AIBTC home",
+                "AIBTC LLM source map",
+                "AIBTC bounties",
+                "AIBTC bounty creation",
+                "AIBTC bounty workflow documentation",
+                "AIBTC OpenAPI schema",
+                "Stacks documentation",
+            ],
+            [
+                "agent identity and registration",
+                "BTC and STX signed actions",
+                "AIBTC bounty creation",
+                "AIBTC bounty submission",
+                "sBTC payment proof and BNTY memo evidence",
+                "x402 and paid agent interactions",
+                "public work reputation",
+                "unsafe autonomy and wallet boundary denial tests",
+            ],
+        )),
+    );
+
+    if let Some(track) = ecosystem.tracks.first_mut() {
+        track.track_id = "aibtc-agent-lab".to_string();
+        track.title = "AIBTC Agent Lab: Sign, Submit, Prove".to_string();
+        track.summary = "A source-grounded agent-economy onboarding track where builders learn signed AIBTC actions, bounty workflows, sBTC payment proof, and reputation evidence without exposing wallet secrets.".to_string();
+        track.content_version = "2026-08-07.1".to_string();
+        track.review_proof = Some(aibtc_review_proof());
+    }
+
+    ecosystem
 }
 
 fn golem_ecosystem() -> EcosystemRegistration {
@@ -464,6 +544,7 @@ impl EcosystemRegistry {
                 )),
             ),
             golem_ecosystem(),
+            aibtc_ecosystem(),
         ])
     }
 
@@ -898,7 +979,7 @@ mod tests {
         let catalog = registry.catalog();
 
         assert_eq!(catalog.schema_version, SCHEMA_VERSION);
-        assert_eq!(catalog.ecosystems.len(), 7);
+        assert_eq!(catalog.ecosystems.len(), 8);
         assert!(
             catalog
                 .ecosystems
@@ -971,6 +1052,29 @@ mod tests {
                 .iter()
                 .any(|source_id| source_id == "golem-ray-limitations")
         );
+        let aibtc = catalog
+            .ecosystems
+            .iter()
+            .find(|ecosystem| ecosystem.ecosystem_id == AIBTC_ECOSYSTEM_ID)
+            .expect("AIBTC agent lab is registered");
+        assert!(matches!(
+            aibtc.configuration,
+            EcosystemConfiguration::Aibtc(_)
+        ));
+        assert_eq!(aibtc.tracks[0].track_id, "aibtc-agent-lab");
+        let aibtc_proof = aibtc.tracks[0]
+            .review_proof
+            .as_ref()
+            .expect("AIBTC track exposes review proof metadata");
+        assert!(aibtc_proof.sample_topic.contains("signed agent actions"));
+        assert_eq!(aibtc_proof.sample_modules.len(), 5);
+        assert!(
+            aibtc_proof
+                .source_ids
+                .iter()
+                .any(|source_id| source_id == "aibtc-bounties-docs")
+        );
+
         let zcash = catalog
             .ecosystems
             .iter()

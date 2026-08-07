@@ -79,7 +79,9 @@ The TON / STON.fi track uses an expanded source pack covering STON.fi DEX overvi
 
 The Golem track uses a compute-specific source pack covering Golem docs, quickstarts, JS SDK, task model, requestor/provider interaction, Python, Ray, dApp deployment, provider docs, and Ray limitations. Validation treats Golem as decentralized compute infrastructure rather than a smart-contract chain, records execution path and compute-model coverage, expects requestor/provider/Yagna/task/result boundaries, and flags overclaims around provider output, cost, GPU/AI support, Ray support, and production certification.
 
-The Golem catalog entry also exposes grant-review proof metadata through `/v3/catalog`: a sample topic, five-module sample path, required evidence artifacts, demo steps, and source IDs. This makes the reviewer path inspectable without replacing the normal AI-generated course flow.
+The AIBTC / Stacks Agents track uses a source pack covering AIBTC home, LLM source map, bounty surfaces, bounty workflow documentation, OpenAPI schema, and Stacks docs. Validation records agent identity coverage, signed-action coverage, bounty-workflow coverage, sBTC payment-proof coverage, reputation evidence, unsafe-autonomy warnings, and final agent-lab readiness. It blocks lessons from implying wallet secret exposure, unapproved autonomous spending, pending-payment proof, or source-unsupported escrow/payout guarantees.
+
+The Golem and AIBTC catalog entries expose grant-review proof metadata through `/v3/catalog`: sample topics, five-module sample paths, required evidence artifacts, demo steps, and source IDs. This makes reviewer paths inspectable without replacing the normal AI-generated course flow.
 
 ## Current Reviewed Track: Zcash Shielded Payments
 
