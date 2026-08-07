@@ -21,7 +21,7 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::TryStreamExt;
 use mongodb::{
     Client as MongoClient, Collection, Database,
@@ -36,7 +36,7 @@ use platform::{
 use reqwest::{Client, StatusCode as ReqwestStatusCode, Url};
 use ring::signature::{self, RsaPublicKeyComponents};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -760,7 +760,7 @@ struct RunAibtcAgentRequest {
     quest: QuestBlueprint,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AibtcAgentRunResponse {
     run_id: String,
     agent_run_id: String,
@@ -776,7 +776,7 @@ struct AibtcAgentRunResponse {
     finished_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AibtcAgentAction {
     step: usize,
     label: String,
@@ -785,15 +785,71 @@ struct AibtcAgentAction {
     evidence: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AibtcAgentEvidence {
     label: String,
     status: String,
     detail: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AibtcAgentDenialCheck {
+    label: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrepareAibtcBountyApplicationRequest {
+    run_id: String,
+    module_id: String,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    target_bounty_id: Option<String>,
+    #[serde(default)]
+    target_bounty_title: Option<String>,
+    #[serde(default)]
+    target_bounty_url: Option<String>,
+    #[serde(default)]
+    submitter_btc_address: Option<String>,
+    #[serde(default)]
+    content_url: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    agent_run: AibtcAgentRunResponse,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcBountyApplicationPacket {
+    packet_id: String,
+    status: String,
+    ready_for_signature: bool,
+    ready_for_live_submit: bool,
+    summary: String,
+    target_bounty: AibtcTargetBounty,
+    submitter_btc_address: Option<String>,
+    content_url: Option<String>,
+    message: String,
+    signed_at: String,
+    signed_message: String,
+    submit_endpoint: String,
+    request_body_template: Value,
+    evidence_checklist: Vec<AibtcApplicationCheck>,
+    blocking_requirements: Vec<String>,
+    approval_boundary: Vec<String>,
+    artifacts: Vec<WorkbenchFile>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcTargetBounty {
+    bounty_id: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcApplicationCheck {
     label: String,
     passed: bool,
     detail: String,
@@ -2296,6 +2352,7 @@ fn normalized_learning_event_type(value: &str) -> Result<String, ApiError> {
         "course_deleted",
         "agent_run_completed",
         "agent_run_blocked",
+        "bounty_application_prepared",
     ];
     if allowed.contains(&normalized.as_str()) {
         Ok(normalized)
@@ -4359,6 +4416,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/ai/learning/quest", post(generate_learning_quest))
         .route("/ai/learning/agent/run", post(run_aibtc_agent))
+        .route(
+            "/ai/learning/agent/application",
+            post(prepare_aibtc_bounty_application),
+        )
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
         .route("/v3/submissions", post(v3_create_submission))
@@ -6649,6 +6710,312 @@ fn json_escape(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+async fn prepare_aibtc_bounty_application(
+    Extension(_principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<PrepareAibtcBountyApplicationRequest>,
+) -> Result<Json<AibtcBountyApplicationPacket>, ApiError> {
+    Ok(Json(build_aibtc_bounty_application_packet(request)?))
+}
+
+fn build_aibtc_bounty_application_packet(
+    request: PrepareAibtcBountyApplicationRequest,
+) -> Result<AibtcBountyApplicationPacket, ApiError> {
+    let ecosystem_id = request
+        .ecosystem_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("aibtc")
+        .to_ascii_lowercase();
+    if ecosystem_id != "aibtc" {
+        return Err(ApiError::InvalidAgentRun);
+    }
+
+    let run_id = clamp_text(request.run_id.trim().to_string(), 96);
+    let module_id = clamp_text(request.module_id.trim().to_string(), 120);
+    if run_id.is_empty()
+        || module_id.is_empty()
+        || request.agent_run.mode != "bounded-autonomous-dry-run"
+    {
+        return Err(ApiError::InvalidAgentRun);
+    }
+
+    let bounty_id = compact_optional_text(request.target_bounty_id, 120);
+    let bounty_title = compact_optional_text(request.target_bounty_title, 180);
+    let bounty_url = compact_optional_url(request.target_bounty_url, 260);
+    let submitter_btc_address = compact_optional_text(request.submitter_btc_address, 120);
+    let content_url = compact_optional_url(request.content_url, 260);
+    let message = compact_optional_text(request.message, 700).unwrap_or_else(|| {
+        aibtc_default_bounty_message(&request.agent_run, bounty_title.as_deref())
+    });
+
+    let mut blocking_requirements = Vec::new();
+    if request.agent_run.status == "blocked" {
+        blocking_requirements.push(
+            "Run the AIBTC agent successfully before preparing a live bounty submission."
+                .to_string(),
+        );
+    }
+    let missing_evidence = aibtc_agent_missing_critical_evidence(&request.agent_run.evidence);
+    if !missing_evidence.is_empty() {
+        blocking_requirements.push(format!(
+            "Agent run is missing critical evidence: {}.",
+            missing_evidence.join(", ")
+        ));
+    }
+    let failed_denials = request
+        .agent_run
+        .denial_checks
+        .iter()
+        .filter(|check| !check.passed)
+        .map(|check| check.label.clone())
+        .collect::<Vec<_>>();
+    if !failed_denials.is_empty() {
+        blocking_requirements.push(format!(
+            "Unsafe autonomy checks must pass before signing: {}.",
+            failed_denials.join(", ")
+        ));
+    }
+    if bounty_id.is_none() {
+        blocking_requirements.push("Choose the exact AIBTC bounty ID before signing.".to_string());
+    }
+    if submitter_btc_address
+        .as_deref()
+        .map(valid_btc_address_shape)
+        != Some(true)
+    {
+        blocking_requirements.push("Add the registered AIBTC agent BTC address.".to_string());
+    }
+    if content_url.is_none() {
+        blocking_requirements
+            .push("Publish the deliverable evidence and add a valid HTTPS contentUrl.".to_string());
+    }
+    if message.trim().chars().count() < 24 {
+        blocking_requirements
+            .push("Write a concrete submission message before signing.".to_string());
+    }
+
+    let signed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let bounty_id_for_message = bounty_id.as_deref().unwrap_or("<AIBTC_BOUNTY_ID>");
+    let submitter_for_message = submitter_btc_address
+        .as_deref()
+        .unwrap_or("<REGISTERED_AGENT_BTC_ADDRESS>");
+    let content_url_for_message = content_url.as_deref().unwrap_or("<PUBLIC_CONTENT_URL>");
+    let signed_message = format!(
+        "AIBTC Bounty Submit | {bounty_id_for_message} | {submitter_for_message} | {message} | {content_url_for_message} | {signed_at}"
+    );
+    let submit_endpoint = format!(
+        "https://aibtc.com/api/bounties/{}/submit",
+        bounty_id.as_deref().unwrap_or("<AIBTC_BOUNTY_ID>")
+    );
+    let ready_for_signature = blocking_requirements.is_empty();
+    let status = if ready_for_signature {
+        "ready-for-signature"
+    } else if request.agent_run.status == "blocked" || !failed_denials.is_empty() {
+        "blocked"
+    } else {
+        "needs-input"
+    }
+    .to_string();
+    let packet_id = format!(
+        "bounty_packet_{}",
+        short_sha256(&format!(
+            "{run_id}:{module_id}:{}:{signed_at}",
+            bounty_id_for_message
+        ))
+    );
+    let evidence_checklist =
+        aibtc_application_evidence_checklist(&request.agent_run, &content_url, &bounty_id);
+    let approval_boundary = vec![
+        "Review the exact bounty ID, message, contentUrl, and signedAt before signing.".to_string(),
+        "Sign the displayed AIBTC Bounty Submit message only with the registered AIBTC agent wallet.".to_string(),
+        "Do not paste private keys or seed phrases into VibeQuest or AIBTC.".to_string(),
+        "VibeQuest does not submit the live API request until you explicitly approve the final signed payload.".to_string(),
+    ];
+    let request_body_template = json!({
+        "submitterBtcAddress": submitter_btc_address.clone().unwrap_or_else(|| "<REGISTERED_AGENT_BTC_ADDRESS>".to_string()),
+        "message": message,
+        "contentUrl": content_url.clone().unwrap_or_else(|| "<PUBLIC_CONTENT_URL>".to_string()),
+        "signedAt": signed_at,
+        "signature": "<SIGNATURE_FROM_REGISTERED_AIBTC_AGENT_WALLET>"
+    });
+    let target_bounty = AibtcTargetBounty {
+        bounty_id: bounty_id.clone(),
+        title: bounty_title.clone(),
+        url: bounty_url.clone(),
+    };
+    let artifacts = aibtc_bounty_application_artifacts(
+        &packet_id,
+        &target_bounty,
+        submitter_btc_address.as_deref(),
+        content_url.as_deref(),
+        &signed_message,
+        &request_body_template,
+        &blocking_requirements,
+        &request.agent_run,
+    );
+
+    Ok(AibtcBountyApplicationPacket {
+        packet_id,
+        status: status.clone(),
+        ready_for_signature,
+        ready_for_live_submit: false,
+        summary: if ready_for_signature {
+            "Application packet is ready for human review and wallet signature. Live submission remains blocked until explicit approval.".to_string()
+        } else {
+            format!(
+                "Application packet prepared but not signable yet: {}",
+                blocking_requirements.join(" ")
+            )
+        },
+        target_bounty,
+        submitter_btc_address,
+        content_url,
+        message,
+        signed_at,
+        signed_message,
+        submit_endpoint,
+        request_body_template,
+        evidence_checklist,
+        blocking_requirements,
+        approval_boundary,
+        artifacts,
+    })
+}
+
+fn compact_optional_text(value: Option<String>, limit: usize) -> Option<String> {
+    value
+        .map(|item| clamp_text(item.trim().to_string(), limit))
+        .filter(|item| !item.is_empty())
+}
+
+fn compact_optional_url(value: Option<String>, limit: usize) -> Option<String> {
+    compact_optional_text(value, limit).filter(|item| {
+        item.starts_with("https://")
+            && !item.bytes().any(|byte| byte.is_ascii_whitespace())
+            && item.contains('.')
+    })
+}
+
+fn valid_btc_address_shape(value: &str) -> bool {
+    let trimmed = value.trim();
+    let len = trimmed.len();
+    (26..=90).contains(&len)
+        && (trimmed.starts_with("bc1") || trimmed.starts_with('1') || trimmed.starts_with('3'))
+        && trimmed.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn aibtc_default_bounty_message(agent_run: &AibtcAgentRunResponse, title: Option<&str>) -> String {
+    let bounty_label = title.unwrap_or("the selected AIBTC bounty");
+    format!(
+        "Submitting VibeQuest AIBTC agent-lab evidence for {bounty_label}: {} Action log: {} actions, {} evidence checks, {} denial checks. Public artifact proves the work without exposing wallet secrets or moving funds.",
+        agent_run.summary,
+        agent_run.actions.len(),
+        agent_run.evidence.len(),
+        agent_run.denial_checks.len()
+    )
+}
+
+fn aibtc_application_evidence_checklist(
+    agent_run: &AibtcAgentRunResponse,
+    content_url: &Option<String>,
+    bounty_id: &Option<String>,
+) -> Vec<AibtcApplicationCheck> {
+    let evidence_present = |label: &str| {
+        agent_run
+            .evidence
+            .iter()
+            .any(|item| item.label == label && item.status == "present")
+    };
+    vec![
+        AibtcApplicationCheck {
+            label: "Target bounty selected".to_string(),
+            passed: bounty_id.is_some(),
+            detail: "The signed message must bind one exact AIBTC bounty ID.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Public content URL".to_string(),
+            passed: content_url.is_some(),
+            detail: "The deliverable should be a public GitHub, gist, demo, report, or other HTTPS artifact.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Agent run passed".to_string(),
+            passed: agent_run.status == "passed",
+            detail: "The autonomous dry-run must complete without unsafe autonomy blockers.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Signed-action evidence".to_string(),
+            passed: evidence_present("BTC/STX signed action"),
+            detail: "The application must explain the signed action boundary.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Bounty workflow evidence".to_string(),
+            passed: evidence_present("Bounty workflow"),
+            detail: "The packet must map bounty ID, submission window, artifact, and review state.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Payment proof evidence".to_string(),
+            passed: evidence_present("sBTC payment proof") && evidence_present("BNTY memo binding"),
+            detail: "The packet must avoid treating pending state as payment proof.".to_string(),
+        },
+        AibtcApplicationCheck {
+            label: "Reputation evidence".to_string(),
+            passed: evidence_present("Reputation evidence"),
+            detail: "The packet should turn completed work into public evidence.".to_string(),
+        },
+    ]
+}
+
+fn aibtc_bounty_application_artifacts(
+    packet_id: &str,
+    target_bounty: &AibtcTargetBounty,
+    submitter_btc_address: Option<&str>,
+    content_url: Option<&str>,
+    signed_message: &str,
+    request_body_template: &Value,
+    blocking_requirements: &[String],
+    agent_run: &AibtcAgentRunResponse,
+) -> Vec<WorkbenchFile> {
+    let blockers = if blocking_requirements.is_empty() {
+        "None before signing. Live submit still requires explicit approval and signature."
+            .to_string()
+    } else {
+        blocking_requirements
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let report = format!(
+        "# AIBTC Bounty Application Packet\n\nPacket: `{}`\n\nTarget bounty: `{}`\n\nBounty title: {}\n\nSubmitter BTC address: `{}`\n\nContent URL: `{}`\n\nAgent run: `{}` ({})\n\n## Message to sign\n\n```text\n{}\n```\n\n## Remaining blockers\n\n{}\n\n## Approval boundary\n\nDo not sign until the bounty ID, content URL, submitter address, and message are exact. VibeQuest prepares this packet but does not perform the live AIBTC submit request without explicit approval.\n",
+        packet_id,
+        target_bounty
+            .bounty_id
+            .as_deref()
+            .unwrap_or("<AIBTC_BOUNTY_ID>"),
+        target_bounty.title.as_deref().unwrap_or("not set"),
+        submitter_btc_address.unwrap_or("<REGISTERED_AGENT_BTC_ADDRESS>"),
+        content_url.unwrap_or("<PUBLIC_CONTENT_URL>"),
+        agent_run.agent_run_id,
+        agent_run.status,
+        signed_message,
+        blockers,
+    );
+    vec![
+        WorkbenchFile {
+            path: "aibtc-bounty-application.md".to_string(),
+            language: "markdown".to_string(),
+            content: report,
+        },
+        WorkbenchFile {
+            path: "aibtc-bounty-submit.body.json".to_string(),
+            language: "json".to_string(),
+            content: serde_json::to_string_pretty(request_body_template)
+                .unwrap_or_else(|_| "{}".to_string()),
+        },
+    ]
 }
 
 async fn bind_wallet_user(
@@ -13164,6 +13531,91 @@ mod tests {
                 .iter()
                 .any(|check| check.label == "Live external side-effect denial" && !check.passed)
         );
+    }
+
+    #[test]
+    fn aibtc_bounty_application_packet_reaches_signature_readiness_without_live_submit() {
+        let agent_run = build_aibtc_agent_run(test_aibtc_agent_run_request("")).unwrap();
+        let packet = build_aibtc_bounty_application_packet(PrepareAibtcBountyApplicationRequest {
+            run_id: "quest-run-aibtc".to_string(),
+            module_id: "module-aibtc".to_string(),
+            ecosystem_id: Some("aibtc".to_string()),
+            target_bounty_id: Some("bounty-123".to_string()),
+            target_bounty_title: Some("Test AIBTC agent workflow".to_string()),
+            target_bounty_url: Some("https://aibtc.com/bounties/bounty-123".to_string()),
+            submitter_btc_address: Some("bc1q9zp0exampleagentaddress000000000000000000".to_string()),
+            content_url: Some("https://gist.github.com/FidelCoder/aibtc-agent-lab-evidence".to_string()),
+            message: Some("Submitting VibeQuest AIBTC agent-lab evidence with signed-action, bounty, payment-proof, memo, reputation, and unsafe-autonomy denial artifacts.".to_string()),
+            agent_run,
+        })
+        .unwrap();
+
+        assert_eq!(packet.status, "ready-for-signature");
+        assert!(packet.ready_for_signature);
+        assert!(!packet.ready_for_live_submit);
+        assert!(packet.blocking_requirements.is_empty());
+        assert!(
+            packet
+                .signed_message
+                .starts_with("AIBTC Bounty Submit | bounty-123 | bc1q9zp0exampleagentaddress")
+        );
+        assert_eq!(
+            packet.submit_endpoint,
+            "https://aibtc.com/api/bounties/bounty-123/submit"
+        );
+        assert!(
+            packet
+                .artifacts
+                .iter()
+                .any(|file| file.path == "aibtc-bounty-application.md")
+        );
+        assert!(
+            packet
+                .artifacts
+                .iter()
+                .any(|file| file.path == "aibtc-bounty-submit.body.json")
+        );
+    }
+
+    #[test]
+    fn aibtc_bounty_application_packet_blocks_missing_target_and_content() {
+        let agent_run = build_aibtc_agent_run(test_aibtc_agent_run_request("")).unwrap();
+        let packet = build_aibtc_bounty_application_packet(PrepareAibtcBountyApplicationRequest {
+            run_id: "quest-run-aibtc".to_string(),
+            module_id: "module-aibtc".to_string(),
+            ecosystem_id: Some("aibtc".to_string()),
+            target_bounty_id: None,
+            target_bounty_title: None,
+            target_bounty_url: None,
+            submitter_btc_address: None,
+            content_url: None,
+            message: None,
+            agent_run,
+        })
+        .unwrap();
+
+        assert_eq!(packet.status, "needs-input");
+        assert!(!packet.ready_for_signature);
+        assert!(
+            packet
+                .blocking_requirements
+                .iter()
+                .any(|item| item.contains("bounty ID"))
+        );
+        assert!(
+            packet
+                .blocking_requirements
+                .iter()
+                .any(|item| item.contains("registered AIBTC agent BTC address"))
+        );
+        assert!(
+            packet
+                .blocking_requirements
+                .iter()
+                .any(|item| item.contains("contentUrl"))
+        );
+        assert!(packet.signed_message.contains("<AIBTC_BOUNTY_ID>"));
+        assert!(packet.signed_message.contains("<PUBLIC_CONTENT_URL>"));
     }
 
     #[test]
