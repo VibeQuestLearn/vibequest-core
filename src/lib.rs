@@ -748,6 +748,57 @@ struct GenerateLearningQuestResponse {
     warning: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RunAibtcAgentRequest {
+    run_id: String,
+    module_id: String,
+    #[serde(default)]
+    ecosystem_id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    learning_context: LearningQuestLink,
+    quest: QuestBlueprint,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcAgentRunResponse {
+    run_id: String,
+    agent_run_id: String,
+    mode: String,
+    status: String,
+    summary: String,
+    safety_boundary: Vec<String>,
+    actions: Vec<AibtcAgentAction>,
+    evidence: Vec<AibtcAgentEvidence>,
+    denial_checks: Vec<AibtcAgentDenialCheck>,
+    artifacts: Vec<WorkbenchFile>,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcAgentAction {
+    step: usize,
+    label: String,
+    intent: String,
+    status: String,
+    evidence: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcAgentEvidence {
+    label: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AibtcAgentDenialCheck {
+    label: String,
+    passed: bool,
+    detail: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct LearningEventRequest {
     event_type: String,
@@ -1059,6 +1110,10 @@ enum ApiError {
     MissingOpenAiKey,
     #[error("AI generation is temporarily unavailable. Please regenerate in a moment.")]
     OpenAiTransport(String),
+    #[error(
+        "AIBTC autonomous agent runs are bounded to source-grounded dry-run evidence and require an AIBTC quest."
+    )]
+    InvalidAgentRun,
     #[error("AI generation is temporarily unavailable. Please regenerate in a moment.")]
     OpenAiStatus {
         status: ReqwestStatusCode,
@@ -2239,6 +2294,8 @@ fn normalized_learning_event_type(value: &str) -> Result<String, ApiError> {
         "module_regenerated",
         "course_archived",
         "course_deleted",
+        "agent_run_completed",
+        "agent_run_blocked",
     ];
     if allowed.contains(&normalized.as_str()) {
         Ok(normalized)
@@ -4301,6 +4358,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             patch(api_archive_learning_session),
         )
         .route("/ai/learning/quest", post(generate_learning_quest))
+        .route("/ai/learning/agent/run", post(run_aibtc_agent))
         .route("/v3/me", get(v3_me).delete(v3_delete_account))
         .route("/v3/me/export", get(v3_export_account))
         .route("/v3/submissions", post(v3_create_submission))
@@ -6136,6 +6194,461 @@ async fn generate_learning_quest(
         warning: persistence.warning.clone(),
         persistence,
     }))
+}
+
+async fn run_aibtc_agent(
+    Extension(_principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<RunAibtcAgentRequest>,
+) -> Result<Json<AibtcAgentRunResponse>, ApiError> {
+    Ok(Json(build_aibtc_agent_run(request)?))
+}
+
+fn build_aibtc_agent_run(request: RunAibtcAgentRequest) -> Result<AibtcAgentRunResponse, ApiError> {
+    let ecosystem_id = request
+        .ecosystem_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("aibtc")
+        .to_ascii_lowercase();
+    if ecosystem_id != "aibtc" {
+        return Err(ApiError::InvalidAgentRun);
+    }
+
+    let run_id = clamp_text(request.run_id.trim().to_string(), 96);
+    let module_id = clamp_text(request.module_id.trim().to_string(), 120);
+    if run_id.is_empty() || module_id.is_empty() {
+        return Err(ApiError::InvalidAgentRun);
+    }
+
+    let started_at = Utc::now();
+    let topic = request
+        .topic
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("AIBTC autonomous agent lab");
+    let quest_text = aibtc_agent_quest_text(&request.quest, &request.learning_context, topic);
+    if !quest_text.contains("aibtc") || !quest_text.contains("agent") {
+        return Err(ApiError::InvalidAgentRun);
+    }
+
+    let evidence = aibtc_agent_evidence(&quest_text);
+    let denial_checks = aibtc_agent_denial_checks(&quest_text);
+    let insufficient_evidence = aibtc_agent_missing_critical_evidence(&evidence);
+    let blocked =
+        !insufficient_evidence.is_empty() || denial_checks.iter().any(|check| !check.passed);
+    let actions = aibtc_agent_actions(&evidence, blocked);
+    let status = if blocked { "blocked" } else { "passed" }.to_string();
+    let agent_run_id = format!(
+        "agent_{}",
+        short_sha256(&format!(
+            "{run_id}:{module_id}:{topic}:{}",
+            request.learning_context.lesson_id
+        ))
+    );
+    let artifacts = aibtc_agent_artifacts(
+        &agent_run_id,
+        &run_id,
+        &module_id,
+        topic,
+        &status,
+        &evidence,
+        &denial_checks,
+    );
+    let finished_at = Utc::now();
+
+    Ok(AibtcAgentRunResponse {
+        run_id,
+        agent_run_id,
+        mode: "bounded-autonomous-dry-run".to_string(),
+        status: status.clone(),
+        summary: if blocked {
+            let missing = if insufficient_evidence.is_empty() {
+                "unsafe autonomy was detected".to_string()
+            } else {
+                format!("missing critical evidence: {}", insufficient_evidence.join(", "))
+            };
+            format!("Agent run blocked before any external action because {missing}.")
+        } else {
+            "Agent run completed as a bounded dry-run: it planned signed actions, checked bounty/payment/reputation evidence, and produced reviewable artifacts without wallet or network side effects.".to_string()
+        },
+        safety_boundary: vec![
+            "No private keys, seed phrases, or wallet secrets are requested or stored.".to_string(),
+            "No live AIBTC bounty, x402 request, sBTC transfer, or BNTY memo is submitted.".to_string(),
+            "The agent can only inspect the generated quest, produce a plan, and record denial evidence.".to_string(),
+            "Any autonomous-spend, pending-payment-as-proof, escrow-overclaim, or secret-handling path blocks the run.".to_string(),
+        ],
+        actions,
+        evidence,
+        denial_checks,
+        artifacts,
+        started_at,
+        finished_at,
+    })
+}
+
+fn aibtc_agent_quest_text(
+    quest: &QuestBlueprint,
+    learning_context: &LearningQuestLink,
+    topic: &str,
+) -> String {
+    let mut parts = vec![
+        topic.to_string(),
+        learning_context.module_title.clone(),
+        learning_context.lesson_title.clone(),
+        learning_context.checkpoint_question.clone(),
+        learning_context.quest_bridge.clone(),
+        learning_context.concepts.join(" "),
+        learning_context.lesson_summary.clone(),
+        quest.title.clone(),
+        quest.premise.clone(),
+        quest.build_objective.clone(),
+        quest.boss_fight.clone(),
+        quest.reward_logic.clone(),
+        quest.comprehension_gates.join(" "),
+        quest.ckb_fiber_hooks.join(" "),
+        quest.code_explainer.primary_invariant.clone(),
+        quest.code_explainer.denial_path.clone(),
+        quest.code_explainer.proof_label.clone(),
+        quest.code_explainer.proof_artifact.clone(),
+        quest.code_explainer.network_boundary.clone(),
+        quest.code_explainer.risk_focus.clone(),
+        quest.code_explainer.inspect_steps.join(" "),
+    ];
+    if let Some(challenge) = &quest.challenge_brief {
+        parts.extend([
+            challenge.question.clone(),
+            challenge.correct_answer.clone(),
+            challenge.invariant.clone(),
+            challenge.attack_scenario.clone(),
+            challenge.code_focus.clone(),
+            challenge.test_focus.clone(),
+            challenge.hint.clone(),
+            challenge.follow_up_question.clone(),
+        ]);
+    }
+    parts.extend(
+        quest
+            .workbench_files
+            .iter()
+            .map(|file| format!("{} {}", file.path, file.content)),
+    );
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn aibtc_agent_evidence(text: &str) -> Vec<AibtcAgentEvidence> {
+    vec![
+        aibtc_agent_evidence_item(
+            "Agent identity",
+            contains_any(
+                text,
+                &[
+                    "agent id",
+                    "agent identity",
+                    "agent profile",
+                    "public work history",
+                ],
+            ),
+            "Agent identity or public work history is named before reputation is trusted.",
+        ),
+        aibtc_agent_evidence_item(
+            "BTC/STX signed action",
+            contains_any(
+                text,
+                &[
+                    "btc signature",
+                    "stx signature",
+                    "signed action",
+                    "signed api",
+                    "signed request",
+                ],
+            ),
+            "Signed request scope is present for action authorization.",
+        ),
+        aibtc_agent_evidence_item(
+            "Replay boundary",
+            contains_any(text, &["nonce", "timestamp", "replay", "stale timestamp"]),
+            "Nonce/timestamp freshness is checked before accepting an action.",
+        ),
+        aibtc_agent_evidence_item(
+            "Bounty workflow",
+            contains_any(
+                text,
+                &[
+                    "bounty id",
+                    "submission window",
+                    "artifact",
+                    "fixed reward",
+                    "reviewer state",
+                ],
+            ),
+            "Bounty ID, submission, reward, or review evidence is named.",
+        ),
+        aibtc_agent_evidence_item(
+            "sBTC payment proof",
+            contains_any(
+                text,
+                &[
+                    "sbtc",
+                    "transfer",
+                    "confirmation",
+                    "confirmed",
+                    "payment proof",
+                ],
+            ),
+            "Payment proof is separated from pending UI state.",
+        ),
+        aibtc_agent_evidence_item(
+            "BNTY memo binding",
+            contains_any(text, &["bnty memo", "memo"]),
+            "Memo evidence is bound to payment/submission context.",
+        ),
+        aibtc_agent_evidence_item(
+            "Reputation evidence",
+            contains_any(
+                text,
+                &[
+                    "reputation",
+                    "work history",
+                    "public work",
+                    "evidence trail",
+                ],
+            ),
+            "Reputation is treated as evidence, not a UI badge.",
+        ),
+        aibtc_agent_evidence_item(
+            "x402 paid interaction",
+            contains_any(text, &["x402", "paid interaction", "payment gating"]),
+            "Paid interaction context is handled as a boundary, not an automatic spend permission.",
+        ),
+    ]
+}
+
+fn aibtc_agent_evidence_item(label: &str, passed: bool, detail: &str) -> AibtcAgentEvidence {
+    AibtcAgentEvidence {
+        label: label.to_string(),
+        status: if passed { "present" } else { "missing" }.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+fn aibtc_agent_missing_critical_evidence(evidence: &[AibtcAgentEvidence]) -> Vec<String> {
+    let critical = [
+        "Agent identity",
+        "BTC/STX signed action",
+        "Replay boundary",
+        "Bounty workflow",
+        "sBTC payment proof",
+        "BNTY memo binding",
+        "Reputation evidence",
+    ];
+    critical
+        .iter()
+        .filter(|label| {
+            !evidence
+                .iter()
+                .any(|item| item.label == **label && item.status == "present")
+        })
+        .map(|label| (*label).to_string())
+        .collect()
+}
+
+fn aibtc_agent_denial_checks(text: &str) -> Vec<AibtcAgentDenialCheck> {
+    vec![
+        AibtcAgentDenialCheck {
+            label: "Private-key boundary".to_string(),
+            passed: !contains_any(text, &["private key requested", "seed phrase", "export private key", "store private key"]),
+            detail: "Generated agent logic must never request wallet secrets.".to_string(),
+        },
+        AibtcAgentDenialCheck {
+            label: "Explicit approval boundary".to_string(),
+            passed: !contains_any(text, &["autonomous spending without explicit approval", "spend without approval", "agent spends without approval", "unapproved autonomous spending"]),
+            detail: "Payment-like actions require user approval and signed-request scope.".to_string(),
+        },
+        AibtcAgentDenialCheck {
+            label: "Pending payment denial".to_string(),
+            passed: !contains_any(text, &["pending payment proves", "pending payment as proof", "pending transfer proves", "pending ui proves"]),
+            detail: "Pending payment state cannot prove completion.".to_string(),
+        },
+        AibtcAgentDenialCheck {
+            label: "Escrow overclaim denial".to_string(),
+            passed: !contains_any(text, &["guaranteed escrow", "escrow guarantees", "escrowed funds prove", "source-unsupported escrow"]),
+            detail: "The agent cannot claim escrow or payout guarantees that are not proven by official evidence.".to_string(),
+        },
+        AibtcAgentDenialCheck {
+            label: "Live external side-effect denial".to_string(),
+            passed: !contains_any(text, &["submit live bounty", "register live agent", "broadcast sbtc", "send sbtc", "move funds"]),
+            detail: "This VibeQuest agent run is a bounded dry-run and blocks live external side effects.".to_string(),
+        },
+    ]
+}
+
+fn aibtc_agent_actions(evidence: &[AibtcAgentEvidence], blocked: bool) -> Vec<AibtcAgentAction> {
+    let all_present = |labels: &[&str]| {
+        labels.iter().all(|label| {
+            evidence
+                .iter()
+                .any(|item| item.label == *label && item.status == "present")
+        })
+    };
+    let mut actions = vec![
+        AibtcAgentAction {
+            step: 1,
+            label: "Inspect agent identity".to_string(),
+            intent: "Map agent profile and claimed BTC/STX addresses to explicit evidence.".to_string(),
+            status: if all_present(&["Agent identity"]) { "completed" } else { "needs-review" }.to_string(),
+            evidence: "Uses generated quest context only; no external profile mutation.".to_string(),
+        },
+        AibtcAgentAction {
+            step: 2,
+            label: "Prepare signed action dry-run".to_string(),
+            intent: "Build a signed-request plan with signer scope, nonce freshness, and replay denial.".to_string(),
+            status: if all_present(&["BTC/STX signed action", "Replay boundary"]) { "completed" } else { "needs-review" }.to_string(),
+            evidence: "Produces a dry-run payload summary rather than a wallet signature.".to_string(),
+        },
+        AibtcAgentAction {
+            step: 3,
+            label: "Validate bounty workflow".to_string(),
+            intent: "Check bounty ID, submission window, artifact URL, fixed reward terms, and reviewer state.".to_string(),
+            status: if all_present(&["Bounty workflow"]) { "completed" } else { "needs-review" }.to_string(),
+            evidence: "Records bounty evidence fields without submitting to AIBTC.".to_string(),
+        },
+        AibtcAgentAction {
+            step: 4,
+            label: "Validate payment evidence".to_string(),
+            intent: "Separate confirmed sBTC transfer and BNTY memo evidence from pending UI state.".to_string(),
+            status: if all_present(&["sBTC payment proof", "BNTY memo binding"]) { "completed" } else { "needs-review" }.to_string(),
+            evidence: "No transfer is sent; the agent only evaluates proof requirements.".to_string(),
+        },
+        AibtcAgentAction {
+            step: 5,
+            label: "Assemble reputation trail".to_string(),
+            intent: "Tie completed work, signed action evidence, bounty evidence, and payment proof into a public reputation record.".to_string(),
+            status: if all_present(&["Reputation evidence"]) { "completed" } else { "needs-review" }.to_string(),
+            evidence: "Creates local artifact guidance for review.".to_string(),
+        },
+    ];
+    if blocked {
+        actions.push(AibtcAgentAction {
+            step: 6,
+            label: "Block unsafe autonomy".to_string(),
+            intent: "Stop before any external side effect because a denial check failed."
+                .to_string(),
+            status: "blocked".to_string(),
+            evidence: "Failure is intentional and reviewable.".to_string(),
+        });
+    } else {
+        actions.push(AibtcAgentAction {
+            step: 6,
+            label: "Emit audit packet".to_string(),
+            intent: "Return a reviewable run packet for the learner and grant reviewers."
+                .to_string(),
+            status: "completed".to_string(),
+            evidence: "Run packet includes actions, evidence, denial checks, and JSON artifact."
+                .to_string(),
+        });
+    }
+    actions
+}
+
+fn aibtc_agent_artifacts(
+    agent_run_id: &str,
+    run_id: &str,
+    module_id: &str,
+    topic: &str,
+    status: &str,
+    evidence: &[AibtcAgentEvidence],
+    denial_checks: &[AibtcAgentDenialCheck],
+) -> Vec<WorkbenchFile> {
+    let evidence_json = evidence
+        .iter()
+        .map(|item| {
+            format!(
+                r#"    {{ "label": "{}", "status": "{}", "detail": "{}" }}"#,
+                json_escape(&item.label),
+                item.status,
+                json_escape(&item.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let denial_json = denial_checks
+        .iter()
+        .map(|item| {
+            format!(
+                r#"    {{ "label": "{}", "passed": {}, "detail": "{}" }}"#,
+                json_escape(&item.label),
+                item.passed,
+                json_escape(&item.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let manifest = format!(
+        r#"{{
+  "agent_run_id": "{}",
+  "quest_run_id": "{}",
+  "module_id": "{}",
+  "ecosystem": "aibtc",
+  "mode": "bounded-autonomous-dry-run",
+  "status": "{}",
+  "topic": "{}",
+  "blocked_external_side_effects": true,
+  "evidence": [
+{}
+  ],
+  "denial_checks": [
+{}
+  ]
+}}"#,
+        json_escape(agent_run_id),
+        json_escape(run_id),
+        json_escape(module_id),
+        status,
+        json_escape(topic),
+        evidence_json,
+        denial_json,
+    );
+    let policy = r#"export function runAibtcAutonomyGuard(intent) {
+  if (intent.requestsPrivateKey || intent.requestsSeedPhrase) return 'blocked-secret-request';
+  if (intent.submitsLiveBounty || intent.registersLiveAgent) return 'blocked-live-aibtc-side-effect';
+  if (intent.sendsSbtc || intent.movesFunds) return 'blocked-wallet-side-effect';
+  if (intent.treatsPendingPaymentAsProof) return 'blocked-pending-payment-proof';
+  return 'dry-run-only';
+}
+"#;
+    vec![
+        WorkbenchFile {
+            path: "aibtc-agent-run.manifest.json".to_string(),
+            language: "json".to_string(),
+            content: manifest,
+        },
+        WorkbenchFile {
+            path: "aibtc-autonomy-guard.ts".to_string(),
+            language: "typescript".to_string(),
+            content: policy.to_string(),
+        },
+    ]
+}
+
+fn contains_any(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn short_sha256(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    format!("{:x}", digest)[..16].to_string()
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 async fn bind_wallet_user(
@@ -10787,7 +11300,8 @@ impl IntoResponse for ApiError {
             | ApiError::UnsupportedWalletSignature
             | ApiError::InvalidWalletSignature
             | ApiError::MissingFiberInvoice
-            | ApiError::InvalidFiberInvoice => StatusCode::BAD_REQUEST,
+            | ApiError::InvalidFiberInvoice
+            | ApiError::InvalidAgentRun => StatusCode::BAD_REQUEST,
             ApiError::MissingOpenAiKey
             | ApiError::DatabaseUnavailable
             | ApiError::FiberPayoutUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -12502,6 +13016,153 @@ mod tests {
                 .unsupported_claim_warnings
                 .iter()
                 .any(|warning| warning.contains("Pending payment state"))
+        );
+    }
+
+    fn test_aibtc_agent_run_request(extra_quest_text: &str) -> RunAibtcAgentRequest {
+        let learning_context = LearningQuestLink {
+            module_id: "module-aibtc".to_string(),
+            lesson_id: "lesson-final-agent".to_string(),
+            module_title: "AIBTC Agent Lab".to_string(),
+            lesson_title: "Final AIBTC signed-action quest".to_string(),
+            checkpoint_question: "Which AIBTC agent ID, BTC signature, STX signature, signed API request, bounty ID, submission window, fixed reward, sBTC transfer, BNTY memo, x402 payment, and reputation evidence makes the final agent lab trustworthy?".to_string(),
+            quest_bridge: "Build a signed-action validator, bounty workflow proof map, sBTC payment proof, BNTY memo evidence, and reputation trail.".to_string(),
+            concepts: vec![
+                "AIBTC".to_string(),
+                "agent identity".to_string(),
+                "BTC signature".to_string(),
+                "STX signature".to_string(),
+                "bounty workflow".to_string(),
+                "sBTC payment proof".to_string(),
+                "BNTY memo".to_string(),
+                "x402 paid interaction".to_string(),
+                "reputation evidence".to_string(),
+            ],
+            correct_answer: "Agent identity, signed payload, nonce, bounty record, confirmed sBTC transfer with BNTY memo, and reputation evidence".to_string(),
+            misunderstanding: "Do not trust profile badges, pending payments, or unsigned payloads.".to_string(),
+            lesson_summary: "AIBTC agent workflow separates agent identity, public work history, BTC signature, STX signature, signed API request payload, nonce, timestamp, bounty ID, submission window, fixed reward, artifact URL, reviewer state, sBTC transfer evidence, BNTY memo, confirmation depth, x402 paid interaction context, and reputation evidence.".to_string(),
+        };
+        let safe_body = format!(
+            "AIBTC agent lab validates agent identity, public work history, BTC signature, STX signature, signed API request, nonce, timestamp, bounty ID, submission window, fixed reward, artifact URL, reviewer state, sBTC transfer, BNTY memo, confirmation depth, x402 paid interaction, payment proof, and reputation evidence. It rejects unsigned requests, wrong signer wallets, replayed nonces, invalid bounty IDs, closed windows, missing memos, and unconfirmed transfers without sending funds or submitting live bounties. {extra_quest_text}"
+        );
+        RunAibtcAgentRequest {
+            run_id: "quest-run-aibtc".to_string(),
+            module_id: "module-aibtc".to_string(),
+            ecosystem_id: Some("aibtc".to_string()),
+            topic: Some("AIBTC autonomous agent lab".to_string()),
+            learning_context,
+            quest: QuestBlueprint {
+                title: "AIBTC Autonomous Agent Dry Run".to_string(),
+                premise: safe_body.clone(),
+                build_objective: "Run a bounded autonomous agent that plans signed actions, checks bounty workflow evidence, validates sBTC payment proof, and emits audit artifacts.".to_string(),
+                comprehension_gates: vec![
+                    "Name the signed request boundary".to_string(),
+                    "Separate payment proof from pending UI state".to_string(),
+                    "Reject unsafe autonomy".to_string(),
+                ],
+                boss_fight: "Produce a final agent audit packet for signed AIBTC bounty workflow evidence.".to_string(),
+                challenge_brief: Some(QuestChallengeBrief {
+                    question: "What should the agent trust?".to_string(),
+                    correct_answer: "Signed action, bounty, payment, memo, confirmation, and reputation evidence.".to_string(),
+                    wrong_answers: Vec::new(),
+                    invariant: "No wallet secret or live side effect is needed for the dry run.".to_string(),
+                    attack_scenario: "A fake UI badge claims the bounty was paid.".to_string(),
+                    code_focus: "AIBTC signed action validator".to_string(),
+                    test_focus: "Replay, wrong signer, missing BNTY memo, pending payment, and reputation denial tests.".to_string(),
+                    hint: "Start from the signed payload and confirmation evidence.".to_string(),
+                    follow_up_question: "Which evidence changes if the memo is missing?".to_string(),
+                    resources: default_learning_resources_for_focus("AIBTC"),
+                }),
+                code_explainer: QuestCodeExplainer {
+                    primary_invariant: "AIBTC agent action completion requires agent identity, BTC/STX signature, signed API request, bounty ID, submission window, confirmed sBTC transfer, BNTY memo, and reputation evidence.".to_string(),
+                    denial_path: "Reject unsigned requests, replayed nonce, wrong signer, invalid bounty ID, pending payment, missing BNTY memo, and unconfirmed transfer.".to_string(),
+                    proof_label: "AIBTC agent audit packet".to_string(),
+                    proof_artifact: "aibtc-agent-run.manifest.json".to_string(),
+                    network_label: "AIBTC / Stacks".to_string(),
+                    network_boundary: "Dry-run only; no live AIBTC bounty, x402 request, sBTC transfer, or wallet signature is submitted.".to_string(),
+                    risk_focus: "Unsafe autonomy and payment-proof overclaim.".to_string(),
+                    inspect_steps: vec!["Inspect signed payload".to_string(), "Inspect bounty proof".to_string(), "Inspect payment memo".to_string()],
+                    mentor_prompts: Vec::new(),
+                    resources: default_learning_resources_for_focus("AIBTC"),
+                },
+                reward_logic: "Reward logic is educational: the learner receives an audit packet, not funds.".to_string(),
+                ckb_fiber_hooks: Vec::new(),
+                workbench_files: vec![WorkbenchFile {
+                    path: "aibtc-agent.ts".to_string(),
+                    language: "typescript".to_string(),
+                    content: safe_body,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn aibtc_agent_run_emits_bounded_autonomous_audit_packet() {
+        let run = build_aibtc_agent_run(test_aibtc_agent_run_request("")).unwrap();
+
+        assert_eq!(run.mode, "bounded-autonomous-dry-run");
+        assert_eq!(run.status, "passed");
+        assert!(
+            run.actions
+                .iter()
+                .any(|action| action.label == "Emit audit packet")
+        );
+        assert!(
+            run.evidence
+                .iter()
+                .any(|item| item.label == "BTC/STX signed action" && item.status == "present")
+        );
+        assert!(
+            run.evidence
+                .iter()
+                .any(|item| item.label == "Bounty workflow" && item.status == "present")
+        );
+        assert!(
+            run.evidence
+                .iter()
+                .any(|item| item.label == "sBTC payment proof" && item.status == "present")
+        );
+        assert!(run.denial_checks.iter().all(|check| check.passed));
+        assert!(
+            run.artifacts
+                .iter()
+                .any(|file| file.path == "aibtc-agent-run.manifest.json")
+        );
+        assert!(
+            run.artifacts
+                .iter()
+                .any(|file| file.path == "aibtc-autonomy-guard.ts")
+        );
+    }
+
+    #[test]
+    fn aibtc_agent_run_blocks_unsafe_live_autonomy_claims() {
+        let run = build_aibtc_agent_run(test_aibtc_agent_run_request(
+            "The generated agent spends without approval, pending payment proves completion, asks to store private key, and tries to submit live bounty.",
+        ))
+        .unwrap();
+
+        assert_eq!(run.status, "blocked");
+        assert!(run.actions.iter().any(|action| action.status == "blocked"));
+        assert!(
+            run.denial_checks
+                .iter()
+                .any(|check| check.label == "Private-key boundary" && !check.passed)
+        );
+        assert!(
+            run.denial_checks
+                .iter()
+                .any(|check| check.label == "Explicit approval boundary" && !check.passed)
+        );
+        assert!(
+            run.denial_checks
+                .iter()
+                .any(|check| check.label == "Pending payment denial" && !check.passed)
+        );
+        assert!(
+            run.denial_checks
+                .iter()
+                .any(|check| check.label == "Live external side-effect denial" && !check.passed)
         );
     }
 
